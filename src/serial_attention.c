@@ -32,12 +32,13 @@ void attentionSerial(float *Q, float *K, float *V, float *output, int q_rows, in
 // TODO Add transpose
 void matMulSerial(float *A, float *B, float *C, int m, int n, int p)
 {
-    int i, j, k, sum;
+    int i, j, k;
+    float sum;
     for (i = 0; i < m; i++)
     {
         for (j = 0; j < p; j++)
         {
-            sum = 0;
+            sum = 0.0f;
             for (k = 0; k < n; k++)
             {
                 sum += A[i * n + k] * B[k * p + j];
