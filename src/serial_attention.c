@@ -73,3 +73,32 @@ void softMaxSerial(float *A, int m, int n)
         A[i] /= sum_exp;
     }
 }
+
+void layerNormSerial(float *input, float *gamma, float *beta, float *output, int n)
+{
+    int i;
+    float mean, variance;
+
+    mean = 0.0f;
+    variance = 0.0f;
+
+    // calculate mean
+    for (i = 0; i < n; i++)
+    {
+        mean += input[i];
+    }
+    mean /= n;
+
+    // calculate variance
+    for (i = 0; i < n; i++)
+    {
+        variance += (input[i] - mean) * (input[i] - mean);
+    }
+    variance /= n;
+
+    // normalize
+    for (i = 0; i < n; i++)
+    {
+        output[i] = gamma[i] * (input[i] - mean) / sqrt(variance + 1e-5f) + beta[i];
+    }
+}
