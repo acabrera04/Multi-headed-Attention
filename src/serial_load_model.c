@@ -1,10 +1,10 @@
+#include "model.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "model.h"
 
 // helper to allocate memory and copy data from file
-float* load_tensor(FILE *f, size_t size) {
-  float *data = (float*)malloc(size * sizeof(float));
+float *load_tensor(FILE *f, size_t size) {
+  float *data = (float *)malloc(size * sizeof(float));
   if (!data) {
     fprintf(stderr, "failed to allocate memory\n");
     exit(1);
@@ -19,15 +19,16 @@ float* load_tensor(FILE *f, size_t size) {
   return data;
 }
 
-// load model from file serialized by serialize_model.py, mirroring the hardcoded layout
-GPT2Model* load_model(const char* filename) {
+// load model from file serialized by serialize_model.py, mirroring the
+// hardcoded layout
+GPT2Model *load_model_serial(const char *filename) {
   FILE *f = fopen(filename, "rb");
   if (!f) {
     printf("failed to open model file: %s\n", filename);
     return NULL;
   }
 
-  GPT2Model *model = (GPT2Model*)malloc(sizeof(GPT2Model));
+  GPT2Model *model = (GPT2Model *)malloc(sizeof(GPT2Model));
 
   model->wte = load_tensor(f, VOCAB_SIZE * N_EMBD);
   model->wpe = load_tensor(f, MAX_POS_EMBD * N_EMBD);
@@ -63,8 +64,9 @@ GPT2Model* load_model(const char* filename) {
   return model;
 }
 
-void free_model(GPT2Model* model) {
-  if (!model) return;
+void free_model_serial(GPT2Model *model) {
+  if (!model)
+    return;
 
   free(model->wte);
   free(model->wpe);

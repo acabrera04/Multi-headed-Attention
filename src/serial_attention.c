@@ -2,6 +2,8 @@
 #define M_PI 3.1415926535897932384626433832
 #endif
 
+#include "load_tokens.h"
+#include "model.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -115,4 +117,21 @@ void geluSerial(float *A, int m, int n) {
         0.5f * A[i] *
         (1.0f + tanh(sqrt(2.0f / M_PI) * (A[i] + 0.044715f * pow(A[i], 3.0f))));
   }
+}
+
+int main() {
+  const char *model_path = "../work/gpt2_124m.bin";
+  const char *tokens_path = "../work/tokens.bin";
+  int num_tokens;
+
+  GPT2Model *model = load_model_serial(model_path);
+  int *tokens = load_tokens(tokens_path, &num_tokens);
+
+  if (!(model && tokens)) {
+    free_model_serial(model);
+    free(tokens);
+    return EXIT_FAILURE;
+  }
+
+  printf("model & input loaded\n");
 }
