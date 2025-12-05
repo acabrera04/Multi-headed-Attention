@@ -13,8 +13,10 @@ void layerNormSerial(float *A, float *gamma, float *beta, float *output, int n);
 void geluSerial(float *A, int m, int n);
 
 // entry point
-void attentionSerial(float *Q, float *K, float *V, float *output, int q_rows, int q_cols, int k_rows, int k_cols,
-                     int v_rows, int v_cols) {
+void attentionSerial(float *Q, float *K, float *V, float *output, int q_rows,
+                     int q_cols, int k_rows, int k_cols, int v_rows,
+                     int v_cols) {
+
   // figure out how big this should be
   int buffer_rows = q_rows, buffer_cols = k_rows;
   float *buffer = malloc(sizeof(float) * buffer_rows * buffer_cols);
@@ -57,21 +59,30 @@ void matScalar(float *A, int m, int n, float scalar) {
   }
 }
 
+// this needs to be per row not per matrix
 void softMaxSerial(float *A, int m, int n) {
-  float sum_exp = 0.0;
-  int i = 0;
-  for (i = 0; i < m * n; i++) {
-    A[i] = exp(A[i]);
+  for (int i = 0; i < m; i++) {
+    float *row = &A[i * n];
+    float max_val = row[0];
+    for (int j = 1; j < n; j++) {
+      if (row[j] > max_val)
+        max_val = row[j];
+    }
 
-    sum_exp += A[i];
-  }
+    float sum = 0.0f;
+    for (int j = 0; j < n; j++) {
+      row[j] = exp(row[j] - max_val);
+      sum += row[j];
+    }
 
-  for (i = 0; i < m * n; i++) {
-    A[i] /= sum_exp;
+    for (int j = 0; j < n; j++) {
+      row[j] /= sum;
+    }
   }
 }
 
-void layerNormSerial(float *A, float *gamma, float *beta, float *output, int n) {
+void layerNormSerial(float *A, float *gamma, float *beta, float *output,
+                     int n) {
   int i;
   float mean, variance;
 
@@ -100,6 +111,8 @@ void layerNormSerial(float *A, float *gamma, float *beta, float *output, int n) 
 void geluSerial(float *A, int m, int n) {
   int i;
   for (i = 0; i < m * n; i++) {
-    A[i] = 0.5 * A[i] * (1 + tanh(sqrt(2 / M_PI) * (A[i] + 0.044715 * pow(A[i], 3))));
+    A[i] =
+        0.5f * A[i] *
+        (1.0f + tanh(sqrt(2.0f / M_PI) * (A[i] + 0.044715f * pow(A[i], 3.0f))));
   }
 }
