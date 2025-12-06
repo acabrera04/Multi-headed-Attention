@@ -8,12 +8,17 @@
 #include <helper_cuda.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include "../include/cuda_utils.h"
+#include "model.h"
 
 #define MAX_GRID_DIM 1 << 12
 #define MAX_BLOCK_DIM 1 << 10
 #define BLOCK_DIM 16
 #define THREADS 1 << 8
 #define MAX_TILE_WIDTH 16
+
+#define NUM_STEPS 100
+#define N_LAYER 12
 
 __global__ void mat_mult_cuda(int *d_a, int *d_b, int *d_c, int m, int n, int p, int tile_width)
 {
@@ -142,4 +147,57 @@ int attention_cuda(int my_rank, int nprocs, int *h_Q, int *h_K, int *h_V, int *h
     cudaFree(d_output);
 
     return 1;
+}
+
+int layer_norm(int *input, int length, LayerNorm *layerNorm) {}
+
+int residual_connection() {}
+
+int feed_forward();
+
+int inference(GPT2Model *model, int *tokens, int numOfTokens)
+{
+    float *token_embeddings = model->wte;
+    float *positional_embeddings = model->wpe;
+    float *weight, *bias;
+    TransformerBlock *transformer;
+    for (int step = 0; step < NUM_STEPS; ++step)
+    {
+        // Launch CUDA kernel for inference
+
+        // Lookup embedding
+
+        // Transformer Layers
+        for (int l = 0; l < N_LAYER; l++)
+        {
+            transformer = &(model->h[l]);
+            // Layer Norm 1
+            layer_norm(tokens, numOfTokens, &transformer->ln_1);
+            // Multi-Head Attention
+            //    a. QKV Projection
+            //    b. Attention Mechanism (Softmax(Q*K^T / sqrt(d_k)) * V)
+            //    c. Output Projection
+            // attention_cuda();
+            // Residual Connection 1
+            residual_connection();
+            // Layer Norm 2
+            layer_norm(tokens, &transformer->ln_2);
+            // Feed Forward Network (GELU activation)
+            //    a. Linear -> GELU
+            //    b. Linear
+            feed_forward();
+            // Residual Connection 2
+            residual_connection();
+        }
+
+        // Final Layer Norm
+
+        // Logits (MatMul with embedding table)
+
+        // Synchronize to ensure kernel completion
+        cudaDeviceSynchronize();
+
+        // Next Token Selection
+        // printf("%s", decode_token(current_token));
+    }
 }

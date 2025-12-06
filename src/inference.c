@@ -5,6 +5,9 @@
 
 #include <cuda_runtime.h>
 #include <stdio.h>
+#include "model.h"
+#include "../include/cuda_utils.h"
+#include "load_tokens.h"
 
 #define NUM_STEPS 100
 #define N_LAYER 12
@@ -19,48 +22,22 @@
 
 // Encode input data
 
-int main(void) {
-  // Initialize - start CUDA device, load model, allocate memory, create current state
+// input1: model.bin, input2: tokens.bin
+int main(int argc, char **argv)
+{
+    // Initialize - start CUDA device, load model, allocate memory, create current state
+    // Read arg1 for input
+    char *modelFileName, *tokenFileName;
+    int *tokens, numOfTokens;
+    GPT2Model *model = load_model(modelFileName);
 
-  // Input Processing - encode/tokenize input text, get tokens
+    // Input Processing - encode/tokenize input text, get tokens
+    tokens = load_tokens(tokenFileName, &numOfTokens);
 
-  for (int step = 0; step < NUM_STEPS; ++step) {
-    // Launch CUDA kernel for inference
-    
-    // Lookup embedding
-    
-    // Transformer Layers
-    for (int l = 0; l < N_LAYER; l++) {
-      // Layer Norm 1
-      
-      // Multi-Head Attention
-      //    a. QKV Projection
-      //    b. Attention Mechanism (Softmax(Q*K^T / sqrt(d_k)) * V)
-      //    c. Output Projection
-      
-      // Residual Connection 1
-      
-      // Layer Norm 2
-      
-      // Feed Forward Network (GELU activation)
-      //    a. Linear -> GELU
-      //    b. Linear
-      
-      // Residual Connection 2
-    }
+    // call inference in cuda
+    inference(model, tokens, numOfTokens);
 
-    // Final Layer Norm
-
-    // Logits (MatMul with embedding table) 
-    
-    // Synchronize to ensure kernel completion
-    cudaDeviceSynchronize();
-
-    // Next Token Selection
-    // printf("%s", decode_token(current_token));
-  }
-
-  // Free memory
-    
-  return 0;
+    // Free memory
+    free_model(model);
+    return 0;
 }
