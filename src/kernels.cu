@@ -83,6 +83,18 @@ __global__ void softmax_cuda(int *A, int m, int n)
 {
 }
 
+__global__ void token_embedding_cuda(int *tokens, float *output, int num_tokens, int embedding, float *embded_weights, float *pos_weights)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < num_tokens && col < embedding)
+    {
+        int token = tokens[row];
+        output[row * embedding + col] = embded_weights[token * embedding + col] + pos_weights[row * embedding + col];
+    }
+}
+
 int attention_cuda(int my_rank, int nprocs, int *h_Q, int *h_K, int *h_V, int *h_output, int q_rows, int q_cols, int k_rows, int k_cols, int v_rows, int v_cols)
 {
     int i, iter;
@@ -149,7 +161,13 @@ int attention_cuda(int my_rank, int nprocs, int *h_Q, int *h_K, int *h_V, int *h
     return 1;
 }
 
-float *input_embedding(int *tokens, int num_tokens, float *embed_weights, float *pos_weights) {}
+// Adds token empeddings and position embedding. Creates a num_tokens x N_EMBD matrix
+float *input_embedding(int *tokens, float *output, int num_tokens, float *embed_weights, float *pos_weights)
+{
+    dim3 block(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid((N_EMBD + 15) / 16, ((num_tokens) + 15) / 16);
+    token_embedding_cuda<<<grid, block>>>(tokens, output, num_tokens, N_EMBD, embed_weights, pos_weights);
+}
 
 void layer_norm(float *x, int m, int n, LayerNorm *layerNorm, float *output) {}
 
@@ -166,12 +184,14 @@ void logits(float *x, float *logits, int vocab_size, int k, int *top_indices, fl
 int inference(GPT2Model *model, int *tokens, int num_tokens)
 {
     float *token_embeddings;
-    float *weight, *bias, *h, *attn_out, *mlp_out, *logits_arr;
+    float *weight, *bias, *h, *attn_out, *mlp_out, *logits_arr, *token_embeddings;
     TransformerBlock *transformer;
     int *Q, *K, *V;
     int top_indices[5];
     float top_scores[5];
     cudaError_t cudaError;
+    cudaError = cudaMalloc(&token_embeddings, sizeof(float) * num_tokens * N_EMBD);
+
     cudaError = cudaMalloc(&h, sizeof(float) * num_tokens * N_EMBD);
 
     cudaError = cudaMalloc(&attn_out, sizeof(float) * num_tokens * N_EMBD);
@@ -185,7 +205,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
         // Launch CUDA kernel for inference
 
         // Lookup embedding
-        token_embeddings = input_embedding(tokens, num_tokens, model->wte, model->wpe);
+        input_embedding(tokens, token_embeddings, num_tokens, model->wte, model->wpe);
 
         // Transformer Layers
         for (int l = 0; l < N_LAYER; l++)
@@ -236,4 +256,5 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
     cudaFree(attn_out);
     cudaFree(mlp_out);
     cudaFree(logits_arr);
+    cudaFree(token_embeddings);
 }
