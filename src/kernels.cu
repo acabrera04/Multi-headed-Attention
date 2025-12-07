@@ -69,13 +69,13 @@ __global__ void mat_scalar_cuda(int *d_a, int m, int n, int scalar)
     }
 }
 
-__global__ void mat_add_cuda(int *d_a, int *d_b, int *d_c, int m, int n)
+__global__ void mat_add_cuda(float *d_a, float *d_b, int m, int n)
 {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
     if (row < m && col < n)
     {
-        d_c[row * m + col] = d_a[row * m + col] + d_b[row * m + col];
+        d_a[row * m + col] += d_b[row * m + col];
     }
 }
 
@@ -92,6 +92,65 @@ __global__ void token_embedding_cuda(int *tokens, float *output, int num_tokens,
     {
         int token = tokens[row];
         output[row * embedding + col] = embded_weights[token * embedding + col] + pos_weights[row * embedding + col];
+    }
+}
+
+__global__ void layer_norm_cuda(float *input, float *output, int num_tokens, float *weights, float *bias)
+{
+    int row = blockIdx.x;
+    int tidx = threadIdx.x;
+
+    __shared__ float smem[BLOCK_DIM * BLOCK_DIM];
+
+    if (row < num_tokens)
+    {
+        float *in = input + row * N_EMBD;
+        float *out = output + row * N_EMBD;
+        // Calculate the mean for each row
+        float local_mean = 0.0f;
+        float local_variance = 0.0f;
+
+        for (int i = tidx; i < N_EMBD; i += blockDim.x)
+        {
+            float a = in[i];
+            local_mean += a;
+            local_variance += a * a;
+        }
+
+        smem[tidx] = local_mean;
+        __syncthreads();
+
+        for (int stride = blockDim.x; stride > 0; stride /= 2)
+        {
+            if (tidx < stride)
+            {
+                smem[tidx] += smem[tidx + stride];
+            }
+            __syncthreads();
+        }
+        float mean = smem[0] / N_EMBD;
+        __syncthreads();
+
+        // Calculate the variance for each row
+        smem[tidx] = local_variance;
+        __syncthreads();
+
+        for (int stride = blockDim.x; stride > 0; stride /= 2)
+        {
+            if (tidx < stride)
+            {
+                smem[tidx] += smem[tidx + stride];
+            }
+            __syncthreads();
+        }
+        float variance = (smem[0] / N_EMBD) - (mean * mean);
+        float std_dev = sqrt(variance + 1e-5f);
+        __syncthreads();
+        // Normalize
+        for (int i = tidx; i < N_EMBD; i += blockDim.x)
+        {
+            out[i] = weights[i] * (in[i] - mean) / std_dev + beta[i];
+        }
     }
 }
 
@@ -169,9 +228,17 @@ float *input_embedding(int *tokens, float *output, int num_tokens, float *embed_
     token_embedding_cuda<<<grid, block>>>(tokens, output, num_tokens, N_EMBD, embed_weights, pos_weights);
 }
 
-void layer_norm(float *x, int m, int n, LayerNorm *layerNorm, float *output) {}
+void layer_norm(float *x, int num_tokens, LayerNorm *layerNorm, float *output)
+{
+    dim3 block(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid((N_EMBD + 15) / 16, ((num_tokens) + 15) / 16);
+    layer_norm_cuda<<<grid, block>>>(x, output, num_tokens, layerNorm->weight, layerNorm->bias);
+}
 
-void residual_connection(float *x, float *y) {}
+void residual_connection(float *x, float *y, int num_tokens)
+{
+    mat_add_cuda<<<(num_tokens * N_EMBD + THREADS - 1) / THREADS, THREADS>>>(x, y, num_tokens, N_EMBD);
+}
 
 void attention(float *h, int m, int n, TransformerBlock *transformer, float *output) {}
 
@@ -213,7 +280,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
             transformer = &(model->h[l]);
             // Layer Norm 1
             // returns a numOfTokens x N_EMBD (768) matrix
-            layer_norm(token_embeddings, num_tokens, N_EMBD, &transformer->ln_1, h);
+            layer_norm(token_embeddings, num_tokens, &transformer->ln_1, h);
             // Multi-Head Attention
             //    a. QKV Projection
             //    b. Attention Mechanism (Softmax(Q*K^T / sqrt(d_k)) * V)
@@ -223,17 +290,17 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
             // attention_cuda();
 
             // Residual Connection 1
-            residual_connection(token_embeddings, attn_out);
+            residual_connection(token_embeddings, attn_out, num_tokens);
 
             // Layer Norm 2
-            layer_norm(token_embeddings, num_tokens, N_EMBD, &transformer->ln_2, h);
+            layer_norm(token_embeddings, num_tokens, &transformer->ln_2, h);
             // Feed Forward Network (GELU activation)
             //    a. Linear -> GELU
             //    b. Linear
             feed_forward(h, num_tokens, N_EMBD, transformer, mlp_out);
 
             // Residual Connection 2
-            residual_connection(token_embeddings, mlp_out);
+            residual_connection(token_embeddings, mlp_out, num_tokens);
         }
 
         // Final Layer Norm
@@ -243,10 +310,10 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
         logits(h, logits_arr, VOCAB_SIZE, 5, top_indices, top_scores);
         // Synchronize to ensure kernel completion
         cudaDeviceSynchronize();
-        printf("\nTop 5 predictions for the next token:\n");
+        printf("\nTop 5 predictions for the next token in step %d:\n", step);
         for (int i = 0; i < 5; i++)
         {
-            printf("step=%d, %d. Token ID: %d, Score: %.4f\n", step, i + 1, top_indices[i], top_scores[i]);
+            printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
         }
         // Next Token Selection
         // printf("%s", decode_token(current_token));
