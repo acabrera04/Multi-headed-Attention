@@ -425,4 +425,4 @@ $(WORK_DIR)/load_tokens_cuda.o: $(SRC_DIR)/load_tokens.cpp
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 clean:
-	rm -f $(SERIAL_TARGET) $(MODEL_BIN) $(TOKENS_BIN) $(CUDA_TARGET)
+	rm -f $(SERIAL_TARGET) $(MODEL_BIN) $(TOKENS_BIN) $(CUDA_TARGET) $(CUDA_CU_OBJS) $(CUDA_C_OBJS)

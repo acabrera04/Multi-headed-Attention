@@ -10,7 +10,7 @@ text = sys.argv[1]
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 tokens = tokenizer.encode(text, add_special_tokens=False)
 
-output_file = "../work/tokens.bin"
+output_file = "./work/tokens.bin"
 with open(output_file, "wb") as f:
     for token in tokens:
         f.write(struct.pack("i", token))
