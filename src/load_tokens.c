@@ -6,7 +6,7 @@ int* load_tokens(const char* filename, int* num_tokens) {
     FILE *f = fopen(filename, "rb");
     if (!f) {
         printf("failed to open tokens file: %s\n", filename);
-        return EXIT_FAILURE;
+        return NULL;
     }
 
     // get file size (token is int)
@@ -23,7 +23,7 @@ int* load_tokens(const char* filename, int* num_tokens) {
         fprintf(stderr, "Error reading tokens: expected %d, got %zu\n", *num_tokens, read_count);
         free(tokens);
         fclose(f);
-        return EXIT_FAILURE;
+        return NULL;
     }
 
     fclose(f);
