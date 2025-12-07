@@ -365,6 +365,10 @@ SERIAL_TARGET = $(WORK_DIR)/serial_attention
 MODEL_BIN = $(WORK_DIR)/gpt2_124m.bin
 TOKENS_BIN = $(WORK_DIR)/tokens.bin
 
+# MPI source files
+MPI_SRCS = $(SRC_DIR)/mpi_attention.c $(SRC_DIR)/serial_load_model.c $(SRC_DIR)/load_tokens.cpp
+MPI_TARGET = $(WORK_DIR)/mpi_attention
+
 # CUDA source files
 CUDA_C_SRCS = $(SRC_DIR)/inference.cpp $(SRC_DIR)/load_tokens.cpp
 CUDA_CU_SRCS = $(SRC_DIR)/kernels.cu $(SRC_DIR)/load_model.cu
@@ -378,6 +382,8 @@ cuda: $(CUDA_TARGET)
 
 serial: $(SERIAL_TARGET)
 
+mpi: $(MPI_TARGET)
+
 $(WORK_DIR):
 	mkdir -p $(WORK_DIR)
 
@@ -390,6 +396,10 @@ $(TOKENS_BIN): | $(WORK_DIR)
 $(SERIAL_TARGET): $(SERIAL_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)
 	$(CC) $(CFLAGS) $(SERIAL_SRCS) -o $(SERIAL_TARGET) $(LIBS)
+
+$(MPI_TARGET): $(MPI_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
+	@mkdir -p $(WORK_DIR)
+	$(MPICXX) -I$(SRC_DIR) $(MPI_CCFLAGS) $(MPI_SRCS) -o $(MPI_TARGET) $(MPI_LDFLAGS) $(LIBS)
 
 # CUDA compilation - link all objects together
 $(CUDA_TARGET): $(CUDA_C_OBJS) $(CUDA_CU_OBJS)
