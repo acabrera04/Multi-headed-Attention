@@ -362,6 +362,8 @@ INCLUDE_DIR = include
 
 SERIAL_SRCS = $(SRC_DIR)/serial_attention.c $(SRC_DIR)/serial_load_model.c $(SRC_DIR)/load_tokens.c
 SERIAL_TARGET = $(WORK_DIR)/serial_attention
+MODEL_BIN = $(WORK_DIR)/gpt2_124m.bin
+TOKENS_BIN = $(WORK_DIR)/tokens.bin
 
 # CUDA source files
 CUDA_C_SRCS = $(SRC_DIR)/inference.cpp $(SRC_DIR)/load_tokens.cpp
@@ -376,9 +378,18 @@ cuda: $(CUDA_TARGET)
 
 serial: $(SERIAL_TARGET)
 
-$(SERIAL_TARGET): $(SERIAL_SRCS)
+$(WORK_DIR):
+	mkdir -p $(WORK_DIR)
+
+$(MODEL_BIN): | $(WORK_DIR)
+	cd $(SRC_DIR) && python3 serialize_model.py
+
+$(TOKENS_BIN): | $(WORK_DIR)
+	cd $(SRC_DIR) && python3 tokenizer.py "hello world"
+
+$(SERIAL_TARGET): $(SERIAL_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)
-	$(CC) $(CFLAGS) $^ -o $(SERIAL_TARGET) $(LIBS)
+	$(CC) $(CFLAGS) $(SERIAL_SRCS) -o $(SERIAL_TARGET) $(LIBS)
 
 # CUDA compilation - link all objects together
 $(CUDA_TARGET): $(CUDA_C_OBJS) $(CUDA_CU_OBJS)
@@ -404,4 +415,4 @@ $(WORK_DIR)/load_tokens_cuda.o: $(SRC_DIR)/load_tokens.cpp
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 clean:
-	rm -f $(SERIAL_TARGET)
+	rm -f $(SERIAL_TARGET) $(MODEL_BIN) $(TOKENS_BIN)

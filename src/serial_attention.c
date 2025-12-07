@@ -316,6 +316,7 @@ void transformerBlockSerial(float *x, TransformerBlock *block, int num_tokens) {
 int main() {
   const char *model_path = "../work/gpt2_124m.bin";
   const char *tokens_path = "../work/tokens.bin";
+  const char *output_path = "../work/output.bin";
 
   GPT2Model *model = load_model_serial(model_path);
   if (!model)
@@ -374,6 +375,13 @@ int main() {
   for (int i = 0; i < 5; i++) {
     printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
   }
+
+  // save output predictions to file
+  FILE *f = fopen(output_path, "wb");
+  fwrite(top_indices, sizeof(int), 5, f);
+  fclose(f);
+
+  printf("\nTop 5 token IDs saved to %s\n", output_path);
 
   free(x_final);
   free(logits);
