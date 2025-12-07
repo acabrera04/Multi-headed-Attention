@@ -1,4 +1,5 @@
 import sys
+import os
 import struct
 from transformers import GPT2Tokenizer
 
@@ -11,16 +12,20 @@ def load_tokens(filename):
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python tokens_to_text.py <tokens.bin>")
-        sys.exit(1)
-
-    input_file = sys.argv[1]
+    input_file = None
+    if len(sys.argv) != 2:
+        print("reading from default file '../work/output.bin'")
+        input_file = (r'../work/output.bin')
+    else:
+        input_file = sys.argv[1]
+    
     tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-    tokens = load_tokens(input_file)
-    text = tokenizer.decode(tokens)
+    tokens = list(load_tokens(input_file))
+    print(f"Decoded {len(tokens)} tokens from '{input_file}' to text:")
 
-    print(f"Decoded '{tokens}' to {text}.")
+    for i, t in enumerate(tokens):
+        t = tokenizer.decode([t])
+        print(f'{i+1}. {t}')
 
 
 if __name__ == "__main__":

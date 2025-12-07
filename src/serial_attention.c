@@ -376,10 +376,12 @@ int main() {
     printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
   }
 
-  // save output
+  // save output predictions to file
   FILE *f = fopen(output_path, "wb");
-  fwrite(x_final, sizeof(float), num_tokens * N_EMBD, f);
+  fwrite(top_indices, sizeof(int), 5, f);
   fclose(f);
+
+  printf("\nTop 5 token IDs saved to %s\n", output_path);
 
   free(x_final);
   free(logits);
