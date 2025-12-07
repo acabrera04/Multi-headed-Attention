@@ -370,12 +370,12 @@ MPI_SRCS = $(SRC_DIR)/mpi_attention.c $(SRC_DIR)/serial_load_model.c $(SRC_DIR)/
 MPI_TARGET = $(WORK_DIR)/mpi_attention
 
 # CUDA source files
-CUDA_C_SRCS = $(SRC_DIR)/inference.cpp $(SRC_DIR)/load_tokens.cpp
+CUDA_C_SRCS = $(SRC_DIR)/cuda_attention.cpp $(SRC_DIR)/load_tokens.cpp
 CUDA_CU_SRCS = $(SRC_DIR)/kernels.cu $(SRC_DIR)/load_model.cu
-CUDA_TARGET = $(WORK_DIR)/inference
+CUDA_TARGET = $(WORK_DIR)/cuda_attention
 
 # Object files
-CUDA_C_OBJS = $(WORK_DIR)/inference.o $(WORK_DIR)/load_tokens_cuda.o
+CUDA_C_OBJS = $(WORK_DIR)/cuda_attention.o $(WORK_DIR)/load_tokens_cuda.o
 CUDA_CU_OBJS = $(WORK_DIR)/kernels.o $(WORK_DIR)/load_model.o
 
 cuda: $(CUDA_TARGET)
@@ -416,7 +416,7 @@ $(WORK_DIR)/load_model.o: $(SRC_DIR)/load_model.cu
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 # Compile .c files with nvcc (for CUDA interop)
-$(WORK_DIR)/inference.o: $(SRC_DIR)/inference.cpp
+$(WORK_DIR)/cuda_attention.o: $(SRC_DIR)/cuda_attention.cpp
 	@mkdir -p $(WORK_DIR)
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
