@@ -322,34 +322,66 @@ void attentionMPI(float *x, TransformerBlock *block, int num_tokens, float *out,
 }
 
 // feedforward network (multilayer perceptron)
-void mlpSerial(float *x, TransformerBlock *block, int num_tokens, float *out) {
+void mlpMPI(float *x, TransformerBlock *block, int num_tokens, float *out, int rank, int size) {
   // x: [num_tokens, N_EMBD]
   // c_fc: [N_EMBD, 4*N_EMBD]
 
-  // hidden layer: [num_tokens, 4*N_EMBD]
-  float *h = (float *)malloc(num_tokens * 4 * N_EMBD * sizeof(float));
-  matMulSerial(x, block->c_fc.weight, h, num_tokens, N_EMBD, 4 * N_EMBD);
-
-  // add bias
-  for (int i = 0; i < num_tokens; i++) {
-    for (int j = 0; j < 4 * N_EMBD; j++) {
-      h[i * 4 * N_EMBD + j] += block->c_fc.bias[j];
-    }
+  // hidden_layer: [num_tokens, 4*N_EMBD]
+  // split this across ranks
+  int hidden_dim = 4 * N_EMBD;
+  int local_hidden = hidden_dim / size;
+  
+  // copy weights
+  float *w_fc_local = (float *)malloc(N_EMBD * local_hidden * sizeof(float));
+  
+  for (int i = 0; i < N_EMBD; i++) {
+      memcpy(&w_fc_local[i * local_hidden], 
+             &block->c_fc.weight[i * hidden_dim + rank * local_hidden], 
+             local_hidden * sizeof(float));
   }
 
-  geluSerial(h, num_tokens, 4 * N_EMBD);
-
-  // c_proj: [4*N_EMBD, N_EMBD]
+  // copy bias
+  float *b_fc_local = (float *)malloc(local_hidden * sizeof(float));
+  memcpy(b_fc_local, &block->c_fc.bias[rank * local_hidden], local_hidden * sizeof(float));
+  
+  // local hidden layer: [num_tokens, local_hidden]
+  float *h_local = (float *)malloc(num_tokens * local_hidden * sizeof(float));
+  matMulSerial(x, w_fc_local, h_local, num_tokens, N_EMBD, local_hidden);
+  
+  // add bias
+  for (int i = 0; i < num_tokens; i++) {
+      for (int j = 0; j < local_hidden; j++) {
+          h_local[i * local_hidden + j] += b_fc_local[j];
+      }
+  }
+  free(w_fc_local);
+  free(b_fc_local);
+  
+  geluSerial(h_local, num_tokens, local_hidden);
+  
+  // copy weights
+  float *w_proj_local = (float *)malloc(local_hidden * N_EMBD * sizeof(float));
+  memcpy(w_proj_local, 
+         &block->c_proj_mlp.weight[rank * local_hidden * N_EMBD], 
+         local_hidden * N_EMBD * sizeof(float));
+         
+  // c_proj: [local_hidden, N_EMBD]
   // now project based on model weights
-  matMulSerial(h, block->c_proj_mlp.weight, out, num_tokens, 4 * N_EMBD, N_EMBD);
-
+  float *out_local = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
+  matMulSerial(h_local, w_proj_local, out_local, num_tokens, local_hidden, N_EMBD);
+  free(w_proj_local);
+  
+  // reduce sum
+  MPI_Allreduce(out_local, out, num_tokens * N_EMBD, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+  free(out_local);
+  
   // add bias
   for (int i = 0; i < num_tokens; i++) {
     for (int j = 0; j < N_EMBD; j++) {
       out[i * N_EMBD + j] += block->c_proj_mlp.bias[j];
     }
   }
-  free(h);
+  free(h_local);
 }
 
 // process a single transformer block
@@ -376,7 +408,7 @@ void transformerBlockMPI(float *x, TransformerBlock *block, int num_tokens, int 
 
   // feed forward network
   float *mlp_out = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
-  mlpSerial(h, block, num_tokens, mlp_out);
+  mlpMPI(h, block, num_tokens, mlp_out, rank, size);
 
   // residual
   for (int i = 0; i < num_tokens * N_EMBD; i++) {
