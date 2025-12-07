@@ -394,7 +394,7 @@ $(SERIAL_TARGET): $(SERIAL_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
 # CUDA compilation - link all objects together
 $(CUDA_TARGET): $(CUDA_C_OBJS) $(CUDA_CU_OBJS)
 	@mkdir -p $(WORK_DIR)
-	$(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -o $@ $+ $(LIBRARIES) -lm
+	$(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -lineinfo -o $@ $+ $(LIBRARIES) -lm
 
 # Compile .cu files
 $(WORK_DIR)/kernels.o: $(SRC_DIR)/kernels.cu
@@ -415,4 +415,4 @@ $(WORK_DIR)/load_tokens_cuda.o: $(SRC_DIR)/load_tokens.cpp
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 clean:
-	rm -f $(SERIAL_TARGET) $(MODEL_BIN) $(TOKENS_BIN)
+	rm -f $(SERIAL_TARGET) $(MODEL_BIN) $(TOKENS_BIN) $(CUDA_TARGET)
