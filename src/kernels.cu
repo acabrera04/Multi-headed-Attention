@@ -105,32 +105,35 @@ __global__ void softmax_cuda(float *A, int m, int n)
     if (row < m)
     {
         float *row_ptr = A + row * n;
-        float max_val = -INFINITY;
-        float norm = 0.0f;
+        float local_max = -INFINITY;
         for (int i = tidx; i < n; i += blockDim.x)
         {
             float x = row_ptr[i];
-
-            if (x > max_val)
+            if (x > local_max)
             {
-                norm *= expf(max_val - x);
-                max_val = x;
+                local_max = x;
             }
-            norm += expf(x - max_val);
         }
-
+        smem[tidx] = local_max;
         __syncthreads();
-        smem[tidx] = max_val;
 
         for (int stride = blockDim.x / 2; stride > 0; stride /= 2)
         {
             if (tidx < stride)
             {
-                smem[tidx] = max(smem[tidx], smem[tidx + stride]);
+                smem[tidx] = fmaxf(smem[tidx], smem[tidx + stride]);
             }
             __syncthreads();
         }
-        max_val = smem[0];
+        float max_val = smem[0];
+        __syncthreads();
+        float sum = 0.0f;
+        for (int i = tidx; i < n; i += blockDim.x)
+        {
+            float x = row_ptr[i];
+            sum += expf(x - max_val);
+        }
+        smem[tidx] = sum;
         __syncthreads();
 
         for (int stride = blockDim.x / 2; stride > 0; stride /= 2)
@@ -141,7 +144,7 @@ __global__ void softmax_cuda(float *A, int m, int n)
             }
             __syncthreads();
         }
-        norm = smem[0];
+        float norm = smem[0];
         __syncthreads();
 
         for (int i = tidx; i < n; i += blockDim.x)
