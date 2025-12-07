@@ -360,7 +360,7 @@ SRC_DIR = src
 WORK_DIR = work
 INCLUDE_DIR = include
 
-SERIAL_SRCS = $(SRC_DIR)/serial_attention.c $(SRC_DIR)/serial_load_model.c $(SRC_DIR)/load_tokens.c
+SERIAL_SRCS = $(SRC_DIR)/serial_attention.c $(SRC_DIR)/serial_load_model.c $(SRC_DIR)/load_tokens.cpp
 SERIAL_TARGET = $(WORK_DIR)/serial_attention
 MODEL_BIN = $(WORK_DIR)/gpt2_124m.bin
 TOKENS_BIN = $(WORK_DIR)/tokens.bin
@@ -395,7 +395,7 @@ $(TOKENS_BIN): | $(WORK_DIR)
 
 $(SERIAL_TARGET): $(SERIAL_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)
-	$(CC) $(CFLAGS) $(SERIAL_SRCS) -o $(SERIAL_TARGET) $(LIBS)
+	$(CC) $(CFLAGS) -x c $(SERIAL_SRCS) -o $(SERIAL_TARGET) $(LIBS)
 
 $(MPI_TARGET): $(MPI_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)

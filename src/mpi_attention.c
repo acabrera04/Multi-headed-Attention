@@ -402,7 +402,7 @@ int main(int argc, char **argv) {
 
   const char *model_path = "../work/gpt2_124m.bin";
   const char *tokens_path = "../work/tokens.bin";
-  const char *output_path = "../work/output.bin";
+  const char *output_path = "../work/mpi_output.bin";
 
   printf("Rank %d/%d starting...\n", rank, size);
   GPT2Model *model = load_model_serial(model_path);
