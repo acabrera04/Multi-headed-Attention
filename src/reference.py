@@ -1,5 +1,6 @@
 import torch
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
+import time
 
 # select CUDA 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -26,8 +27,11 @@ def next_tokens(input_text, k):
 
     return list(zip(top_k_tokens, top_k_probs[0].tolist()))
 
-
-predictions = next_tokens(input("Enter text: "), 5)
+input_text = input("Enter text: ")
+start = time.time()
+predictions = next_tokens(input_text, 5)
+end = time.time()
 print("Next token candidates:")
 for n, (token, prob) in enumerate(predictions):
     print(f"{n+1}. {repr(token)} (prob: {prob})")
+print(f'\n Reference Inference time: {(end-start) * 1000:.2f} ms')
