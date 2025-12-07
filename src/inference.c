@@ -23,19 +23,24 @@
 // Encode input data
 
 // input1: model.bin, input2: tokens.bin
-int main(int argc, char **argv)
+int main()
 {
     // Initialize - start CUDA device, load model, allocate memory, create current state
     // Read arg1 for input
-    char *modelFileName, *tokenFileName;
-    int *tokens, numOfTokens;
-    GPT2Model *model = load_model(modelFileName);
+    const char *model_path = "../work/gpt2_124m.bin";
+    const char *tokens_path = "../work/tokens.bin";
+    int *tokens, num_tokens;
+    GPT2Model *model = load_model(model_path);
+    if (!model)
+        return 1;
 
     // Input Processing - encode/tokenize input text, get tokens
-    tokens = load_tokens(tokenFileName, &numOfTokens);
+    tokens = load_tokens(tokens_path, &num_tokens);
+    if (!tokens)
+        return 1;
 
     // call inference in cuda
-    inference(model, tokens, numOfTokens);
+    inference(model, tokens, num_tokens);
 
     // Free memory
     free_model(model);

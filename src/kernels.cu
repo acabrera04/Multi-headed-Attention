@@ -149,55 +149,91 @@ int attention_cuda(int my_rank, int nprocs, int *h_Q, int *h_K, int *h_V, int *h
     return 1;
 }
 
-int layer_norm(int *input, int length, LayerNorm *layerNorm) {}
+float *input_embedding(int *tokens, int num_tokens, float *embed_weights, float *pos_weights) {}
 
-int residual_connection() {}
+void layer_norm(float *x, int m, int n, LayerNorm *layerNorm, float *output) {}
 
-int feed_forward();
+void residual_connection(float *x, float *y) {}
 
-int inference(GPT2Model *model, int *tokens, int numOfTokens)
+void attention(float *h, int m, int n, TransformerBlock *transformer, float *output) {}
+
+void feed_forward(float *x, int m, int n, TransformerBlock *transformer, float *output) {}
+
+void top_k(float *logits, int vocab_size, int k, int *top_indices, float *top_scores) {}
+
+void logits(float *x, float *logits, int vocab_size, int k, int *top_indices, float *top_scores) {}
+
+int inference(GPT2Model *model, int *tokens, int num_tokens)
 {
-    float *token_embeddings = model->wte;
-    float *positional_embeddings = model->wpe;
-    float *weight, *bias;
+    float *token_embeddings;
+    float *weight, *bias, *h, *attn_out, *mlp_out, *logits_arr;
     TransformerBlock *transformer;
+    int *Q, *K, *V;
+    int top_indices[5];
+    float top_scores[5];
+    cudaError_t cudaError;
+    cudaError = cudaMalloc(&h, sizeof(float) * num_tokens * N_EMBD);
+
+    cudaError = cudaMalloc(&attn_out, sizeof(float) * num_tokens * N_EMBD);
+
+    cudaError = cudaMalloc(&mlp_out, sizeof(float) * num_tokens * N_EMBD);
+
+    cudaError = cudaMalloc(&logits_arr, sizeof(float) * VOCAB_SIZE);
+
     for (int step = 0; step < NUM_STEPS; ++step)
     {
         // Launch CUDA kernel for inference
 
         // Lookup embedding
+        token_embeddings = input_embedding(tokens, num_tokens, model->wte, model->wpe);
 
         // Transformer Layers
         for (int l = 0; l < N_LAYER; l++)
         {
             transformer = &(model->h[l]);
             // Layer Norm 1
-            layer_norm(tokens, numOfTokens, &transformer->ln_1);
+            // returns a numOfTokens x N_EMBD (768) matrix
+            layer_norm(token_embeddings, num_tokens, N_EMBD, &transformer->ln_1, h);
             // Multi-Head Attention
             //    a. QKV Projection
             //    b. Attention Mechanism (Softmax(Q*K^T / sqrt(d_k)) * V)
             //    c. Output Projection
+
+            attention(h, num_tokens, N_EMBD, transformer, attn_out);
             // attention_cuda();
+
             // Residual Connection 1
-            residual_connection();
+            residual_connection(token_embeddings, attn_out);
+
             // Layer Norm 2
-            layer_norm(tokens, &transformer->ln_2);
+            layer_norm(token_embeddings, num_tokens, N_EMBD, &transformer->ln_2, h);
             // Feed Forward Network (GELU activation)
             //    a. Linear -> GELU
             //    b. Linear
-            feed_forward();
+            feed_forward(h, num_tokens, N_EMBD, transformer, mlp_out);
+
             // Residual Connection 2
-            residual_connection();
+            residual_connection(token_embeddings, mlp_out);
         }
 
         // Final Layer Norm
+        layer_norm(token_embeddings, num_tokens, N_EMBD, &model->ln_f, h);
 
         // Logits (MatMul with embedding table)
-
+        logits(h, logits_arr, VOCAB_SIZE, 5, top_indices, top_scores);
         // Synchronize to ensure kernel completion
         cudaDeviceSynchronize();
-
+        printf("\nTop 5 predictions for the next token:\n");
+        for (int i = 0; i < 5; i++)
+        {
+            printf("step=%d, %d. Token ID: %d, Score: %.4f\n", step, i + 1, top_indices[i], top_scores[i]);
+        }
         // Next Token Selection
         // printf("%s", decode_token(current_token));
     }
+
+    cudaFree(h);
+    cudaFree(attn_out);
+    cudaFree(mlp_out);
+    cudaFree(logits_arr);
 }
