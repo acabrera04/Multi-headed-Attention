@@ -399,7 +399,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
 
     cudaMalloc(&logits_arr, sizeof(float) * VOCAB_SIZE);
 
-    for (int step = 0; step < NUM_STEPS; ++step)
+    for (int step = 0; step < 1; ++step)
     {
         // Launch CUDA kernel for inference
 
