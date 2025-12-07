@@ -77,8 +77,58 @@ __global__ void mat_add_cuda(float *d_a, float *d_b, int m, int n)
     }
 }
 
-__global__ void softmax_cuda(int *A, int m, int n)
+__global__ void softmax_cuda(float *A, int m, int n)
 {
+    __shared__ float smem[BLOCK_DIM * BLOCK_DIM];
+    int row = blockIdx.x;
+    int tidx = threadIdx.x;
+
+    if (row < m)
+    {
+        float max_val = -1 * INFINITY;
+        float norm = 0.0f;
+        for (int i = tidx; i < n; i += blockDim.x)
+        {
+            float x = A[i];
+
+            if (x > max_val)
+            {
+                norm *= expf(max_val - x);
+                max_val = x;
+            }
+            norm += expf(x - max_val);
+        }
+
+        __syncthreads();
+        smem[tidx] = max_val;
+
+        for (int stride = blockDim.x / 2; stride > 0; stride /= 2)
+        {
+            if (tidx < stride)
+            {
+                smem[tidx] = max(smem[tidx], smem[tidx + stride]);
+            }
+            __syncthreads();
+        }
+        max_val = smem[0];
+        __syncthreads();
+
+        for (int stride = blockDim.x / 2; stride > 0; stride /= 2)
+        {
+            if (tidx < stride)
+            {
+                smem[tidx] += smem[tidx + stride];
+            }
+            __syncthreads();
+        }
+        norm = smem[0];
+        __syncthreads();
+
+        for (int i = tidx; i < n; i += blockDim.x)
+        {
+            A[i] = expf(A[i] - max_val) / norm;
+        }
+    }
 }
 
 __global__ void token_embedding_cuda(int *tokens, float *output, int num_tokens, int embedding, float *embded_weights, float *pos_weights)
@@ -163,74 +213,45 @@ __global__ void gelu_cuda(float *x, int m, int n)
     }
 }
 
-int attention_cuda(int my_rank, int nprocs, int *h_Q, int *h_K, int *h_V, int *h_output, int q_rows, int q_cols, int k_rows, int k_cols, int v_rows, int v_cols)
+__global__ void qkv_decompose_cuda(float *qkv, float *q, float *k, float *v, int num_tokens, int n_head, int head_dim)
 {
-    int i, iter;
-    struct timeval timecheck;
-    long dev_start, dev_end, dev_elapsed;
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    int z = blockIdx.z * blockDim.z + threadIdx.z;
 
-    gettimeofday(&timecheck, NULL);
-    dev_start = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
+    if (y < num_tokens && x < n_head && z < head_dim)
+    {
+        int idx = num_tokens * head_dim * x + head_dim * y + z;
 
-    int *d_Q, *d_K, *d_V, *d_output, *d_buffer;
-    int buffer_rows = q_rows, buffer_cols = k_rows;
-    unsigned int q_size = sizeof(int) * q_rows * q_cols, k_size = sizeof(int) * k_rows * k_cols, v_size = sizeof(int) * v_rows * v_cols;
-    unsigned int output_size = sizeof(int) * q_rows * v_cols;
-    cudaMalloc(reinterpret_cast<void **>(&d_Q), q_size);
-    cudaMalloc(reinterpret_cast<void **>(&d_K), k_size);
-    cudaMalloc(reinterpret_cast<void **>(&d_V), v_size);
-    cudaMalloc(reinterpret_cast<void **>(&d_buffer), sizeof(int) * buffer_rows * buffer_cols);
-    // TODO Confirm that this is correct size
-    cudaMalloc(reinterpret_cast<void **>(&d_output), output_size);
+        int qkv_offset = y * 3 * N_EMBD;
 
-    cudaMemcpy(d_Q, h_Q, q_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_K, h_K, k_size, cudaMemcpyHostToDevice);
-    cudaMemcpy(d_V, h_V, v_size, cudaMemcpyHostToDevice);
+        // Q is first N_EMBD, K is second N_EMBD, V is third N_EMBD (so offset by N_EMBD and 2*N_EMBD)
+        q[idx] = qkv[qkv_offset + x * head_dim + z];
+        k[idx] = qkv[qkv_offset + N_EMBD + x * head_dim + z];
+        v[idx] = qkv[qkv_offset + 2 * N_EMBD + x * head_dim + z];
+    }
+}
 
-    int bx_dim, by_dim, gx_dim, gy_dim;
+__global__ void scaled_dot_product_cuda(float *q, float *k, float *att, float scale, int num_tokens, int head_dim)
+{
+}
 
-    by_dim = bx_dim;
-    // TODO Figure out grid calculations and block dimensions
-    gx_dim = ceil();
-    gy_dim = ceil();
+__global__ void mask_cuda(float *att, int num_tokens, int n_head)
+{
+    int token2 = blockIdx.x * blockDim.x + threadIdx.x;
+    int token = blockIdx.y * blockDim.y + threadIdx.y;
 
-    dim3 grid(gx_dim, gy_dim);
-    dim3 threads(bx_dim, by_dim);
-
-    // TODO Figure out a tilewidth (replace 4), ensure that K is transposed before call
-    // Handles Q*K^T
-    mat_mult_cuda<<<grid, threads>>>(d_Q, d_K, d_buffer, q_rows, q_cols, k_rows, 4);
-
-    // Multiples previous result by a scalar of the dimensions of k
-    mat_scalar_cuda<<<grid, threads>>>(d_buffer, buffer_rows, buffer_cols, 1 / sqrt(q_cols));
-
-    // Handles softmax of result of previous matrix multiplication call
-    softmax_cuda<<<grid, threads>>>(d_buffer, buffer_rows, buffer_cols);
-
-    // multiply the result of the softmax by V
-    mat_mult_cuda<<<grid, threads>>>(d_buffer, d_V, d_output, buffer_rows, buffer_cols, v_cols, 4);
-
-    cudaMemcpy(h_output, d_output, output_size, cudaMemcpyDeviceToHost);
-
-    gettimeofday(&timecheck, NULL);
-    dev_end = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
-    dev_elapsed = dev_end - dev_start;
-
-    printf("dev time: rank=%d: %d procs: %ld msecs\n",
-           my_rank, nprocs, dev_elapsed);
-    fflush(stdout);
-
-    cudaFree(d_Q);
-    cudaFree(d_V);
-    cudaFree(d_K);
-    cudaFree(d_buffer);
-    cudaFree(d_output);
-
-    return 1;
+    if (token < num_tokens && token2 < num_tokens && token2 > token)
+    {
+        for (int head = 0; head < n_head; head++)
+        {
+            att[head * num_tokens * num_tokens + token * num_tokens + token2] = -1e10f;
+        }
+    }
 }
 
 // Adds token empeddings and position embedding. Creates a num_tokens x N_EMBD matrix
-float *input_embedding(int *tokens, float *output, int num_tokens, float *embed_weights, float *pos_weights)
+void input_embedding(int *tokens, float *output, int num_tokens, float *embed_weights, float *pos_weights)
 {
     dim3 block(BLOCK_DIM, BLOCK_DIM);
     dim3 grid((N_EMBD + 15) / 16, ((num_tokens) + 15) / 16);
@@ -249,7 +270,86 @@ void residual_connection(float *x, float *y, int num_tokens)
     mat_add_cuda<<<grid, block>>>(x, y, num_tokens, N_EMBD);
 }
 
-void attention(float *h, int m, int n, TransformerBlock *transformer, float *output) {}
+void attention(float *x, int num_tokens, TransformerBlock *transformer, float *output)
+{
+    int head_dim = N_EMBD / N_HEAD;
+
+    float *qkv;
+    cudaMalloc(&qkv, sizeof(float) * num_tokens * 3 * N_EMBD);
+    dim3 block1(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid1((3 * N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
+
+    // project qkv
+    mat_mult_cuda<<<grid1, block1>>>(x, transformer->c_attn.weight, qkv, num_tokens, N_EMBD, 3 * N_EMBD, MAX_TILE_WIDTH);
+
+    // add bias
+    mat_add_cuda<<<grid1, block1>>>(qkv, transformer->c_attn.bias, num_tokens, 3 * N_EMBD);
+
+    // decompose qkv matrix into Q, K, V
+    float *q, *k, *v;
+    cudaMalloc(&q, sizeof(float) * num_tokens * N_HEAD * head_dim);
+    cudaMalloc(&k, sizeof(float) * num_tokens * N_HEAD * head_dim);
+    cudaMalloc(&v, sizeof(float) * num_tokens * N_HEAD * head_dim);
+
+    // hard coded for now since this is a special 3d case
+    dim3 block2(4, 8, 8);
+    dim3 grid2((N_HEAD + 3) / 4, (num_tokens + 7) / 8, (head_dim + 7) / 8);
+    qkv_decompose_cuda<<<grid2, block2>>>(qkv, q, k, v, num_tokens, N_HEAD, head_dim);
+    cudaFree(qkv);
+
+    // now computing attention scores = dot product between q and k.T
+    // q: [N_HEAD, num_tokens, head_dim]
+    // k: [N_HEAD, num_tokens, head_dim]
+    // leads to matrix of size: [N_HEAD, num_tokens, num_tokens], the attention matrix
+    float *att;
+    cudaMalloc(&att, N_HEAD * num_tokens * num_tokens * sizeof(float));
+    float scale = 1.0f / sqrt(head_dim);
+    dim3 grid3((N_HEAD + 3) / 4, (num_tokens + 7) / 8, (num_tokens + 7) / 8);
+
+    scaled_dot_product_cuda<<<grid3, block2>>>(q, k, att, scale, num_tokens, head_dim);
+
+    cudaFree(q);
+    cudaFree(k);
+
+    // causal mask (a lower triangular matrix)
+    // so that the model cannot attend to future tokens
+    // basically this means setting upper triangular values to -inf (we use a large negative number)
+    // whcih will be zeroed out in softmax
+    dim3 grid4((num_tokens + BLOCK_DIM - 1) / BLOCK_DIM, (num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
+    mask_cuda<<<grid4, block1>>>(att, num_tokens, N_HEAD);
+
+    // softmax
+    // since its a 3D matrix flattened to 1D, we can just treat it as a 2D matrix of size:
+    // [N_HEAD * num_tokens, num_tokens] to apply softmax row-wise
+    dim3 grid5((num_tokens + BLOCK_DIM - 1) / BLOCK_DIM, (N_HEAD * num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
+    softmax_cuda<<<grid5, block1>>>(att, N_HEAD * num_tokens, num_tokens);
+
+    // now compute output values for each head with the attention weights and dot product with v
+    // reminder: v is from qkv matrix
+    // att: [N_HEAD, num_tokens, num_tokens]
+    // v: [N_HEAD, num_tokens, head_dim]
+    // y: [N_HEAD, num_tokens, head_dim]
+
+    float *y_heads;
+    cudaMalloc(&y_heads, N_HEAD * num_tokens * head_dim * sizeof(float));
+
+    // THIS IS NOT A RIGHT TRANSLATION
+    scaled_dot_product_cuda<<<grid2, block2>>>(att, v, y_heads, 1, num_tokens, head_dim);
+
+    cudaFree(att);
+    cudaFree(v);
+
+    float *y_reassembled;
+    cudaMalloc(&y_reassembled, num_tokens * N_HEAD * sizeof(float));
+    // idk some code to assign heads to y
+    cudaFree(y_heads);
+
+    mat_mult_cuda<<<grid1, block1>>>(y_reassembled, transformer->c_proj.weight, output, num_tokens, N_EMBD, N_EMBD, MAX_TILE_WIDTH);
+
+    mat_add_cuda<<<grid1, block1>>>(output, transformer->c_proj.bias, num_tokens, N_EMBD);
+
+    cudaFree(y_reassembled);
+}
 
 void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float *output)
 {
@@ -269,7 +369,7 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
     // gelu
     gelu_cuda<<<grid, block>>>(h, num_tokens, 4 * N_EMBD);
 
-    // c_proj: [4*N_EMBD, N_EMBD]
+    // c_proj: [num_tokens, N_EMBD]
     // now project based on model weights
     mat_mult_cuda<<<grid, block>>>(h, transformer->c_proj_mlp.weight, output, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
 
@@ -284,22 +384,20 @@ void logits(float *x, float *logits, int vocab_size, int k, int *top_indices, fl
 
 int inference(GPT2Model *model, int *tokens, int num_tokens)
 {
-    float *token_embeddings;
-    float *weight, *bias, *h, *attn_out, *mlp_out, *logits_arr, *token_embeddings;
+    float *h, *attn_out, *mlp_out, *logits_arr, *token_embeddings;
     TransformerBlock *transformer;
-    int *Q, *K, *V;
     int top_indices[5];
     float top_scores[5];
-    cudaError_t cudaError;
-    cudaError = cudaMalloc(&token_embeddings, sizeof(float) * num_tokens * N_EMBD);
 
-    cudaError = cudaMalloc(&h, sizeof(float) * num_tokens * N_EMBD);
+    cudaMalloc(&token_embeddings, sizeof(float) * num_tokens * N_EMBD);
 
-    cudaError = cudaMalloc(&attn_out, sizeof(float) * num_tokens * N_EMBD);
+    cudaMalloc(&h, sizeof(float) * num_tokens * N_EMBD);
 
-    cudaError = cudaMalloc(&mlp_out, sizeof(float) * num_tokens * N_EMBD);
+    cudaMalloc(&attn_out, sizeof(float) * num_tokens * N_EMBD);
 
-    cudaError = cudaMalloc(&logits_arr, sizeof(float) * VOCAB_SIZE);
+    cudaMalloc(&mlp_out, sizeof(float) * num_tokens * N_EMBD);
+
+    cudaMalloc(&logits_arr, sizeof(float) * VOCAB_SIZE);
 
     for (int step = 0; step < NUM_STEPS; ++step)
     {
@@ -320,7 +418,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
             //    b. Attention Mechanism (Softmax(Q*K^T / sqrt(d_k)) * V)
             //    c. Output Projection
 
-            attention(h, num_tokens, N_EMBD, transformer, attn_out);
+            attention(h, num_tokens, transformer, attn_out);
             // attention_cuda();
 
             // Residual Connection 1
@@ -338,7 +436,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
         }
 
         // Final Layer Norm
-        layer_norm(token_embeddings, num_tokens, N_EMBD, &model->ln_f, h);
+        layer_norm(token_embeddings, num_tokens, &model->ln_f, h);
 
         // Logits (MatMul with embedding table)
         logits(h, logits_arr, VOCAB_SIZE, 5, top_indices, top_scores);
@@ -358,4 +456,5 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
     cudaFree(mlp_out);
     cudaFree(logits_arr);
     cudaFree(token_embeddings);
+    return 0;
 }

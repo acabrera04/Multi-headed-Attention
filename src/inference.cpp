@@ -23,6 +23,10 @@
 // Encode input data
 
 // input1: model.bin, input2: tokens.bin
+int *load_tokens(const char *filename, int *num_tokens);
+GPT2Model *load_model(const char *filename);
+void free_model(GPT2Model *model);
+int inference(GPT2Model *model, int *tokens, int num_tokens);
 int main()
 {
     // Initialize - start CUDA device, load model, allocate memory, create current state
