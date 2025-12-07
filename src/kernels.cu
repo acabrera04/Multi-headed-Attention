@@ -11,10 +11,10 @@
 #include "../include/cuda_utils.h"
 #include "model.h"
 
-#define MAX_GRID_DIM 1 << 12
-#define MAX_BLOCK_DIM 1 << 10
+#define MAX_GRID_DIM (1 << 12)
+#define MAX_BLOCK_DIM (1 << 10)
 #define BLOCK_DIM 16
-#define THREADS 1 << 8
+#define THREADS (1 << 8)
 #define MAX_TILE_WIDTH 16
 
 #define NUM_STEPS 100
@@ -98,7 +98,7 @@ __global__ void mat_add_bias_cuda(float *mat, float *bias, int m, int n)
 
 __global__ void softmax_cuda(float *A, int m, int n)
 {
-    __shared__ float smem[BLOCK_DIM * BLOCK_DIM];
+    __shared__ float smem[THREADS];
     int row = blockIdx.x;
     int tidx = threadIdx.x;
 
@@ -273,6 +273,24 @@ __global__ void scaled_dot_product_cuda(float *q, float *k, float *att, float sc
     }
 }
 
+__global__ void attention_values_cuda(float *att, float *v, float *y, int num_tokens, int head_dim)
+{
+    int feat = blockIdx.x * blockDim.x + threadIdx.x;
+    int token = blockIdx.y * blockDim.y + threadIdx.y;
+    int head = blockIdx.z * blockDim.z + threadIdx.z;
+
+    if (token < num_tokens && feat < head_dim && head < N_HEAD)
+    {
+        float sum = 0.0f;
+        float *att_base = att + head * num_tokens * num_tokens + token * num_tokens;
+        for (int i = 0; i < num_tokens; i++)
+        {
+            sum += att_base[i] * v[head * num_tokens * head_dim + i * head_dim + feat];
+        }
+        y[head * num_tokens * head_dim + token * head_dim + feat] = sum;
+    }
+}
+
 __global__ void mask_cuda(float *att, int num_tokens, int n_head)
 {
     int token2 = blockIdx.x * blockDim.x + threadIdx.x;
@@ -294,11 +312,24 @@ __global__ void compute_logits_cuda(float *logits, float *last_token_emb, float 
     if (i < VOCAB_SIZE)
     {
         float sum = 0.0f;
+
         for (int j = 0; j < N_EMBD; j++)
         {
             sum += last_token_emb[j] * wte[i * N_EMBD + j];
         }
         logits[i] = sum;
+    }
+}
+
+__global__ void reassemble_heads_cuda(float *y_heads, float *y_reassembled, int num_tokens, int head_dim)
+{
+    int token = blockDim.y * blockIdx.y + threadIdx.y;
+    int feat = blockDim.x * blockIdx.x + threadIdx.x;
+    if (feat < N_EMBD && token < num_tokens)
+    {
+        int head = feat / head_dim;
+        int d = feat % head_dim;
+        y_reassembled[token * N_EMBD + feat] = y_heads[head * num_tokens * head_dim + token * head_dim + d];
     }
 }
 
@@ -411,24 +442,26 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
     float *y_heads;
     checkCudaErrors(cudaMalloc(&y_heads, N_HEAD * num_tokens * head_dim * sizeof(float)));
 
-    // THIS IS NOT A RIGHT TRANSLATION
-    scaled_dot_product_cuda<<<grid2, block2>>>(att, v, y_heads, 1, num_tokens, head_dim);
-
-    CHECK_CUDA_KERNEL("attention dot_product2");
+    dim3 grid5((head_dim + 7) / 8, (num_tokens + 7) / 8, (N_HEAD + 3) / 4);
+    attention_values_cuda<<<grid5, block2>>>(att, v, y_heads, num_tokens, head_dim);
+    CHECK_CUDA_KERNEL("attention output values");
 
     cudaFree(att);
     cudaFree(v);
 
     float *y_reassembled;
-    checkCudaErrors(cudaMalloc(&y_reassembled, num_tokens * N_HEAD * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&y_reassembled, num_tokens * N_EMBD * sizeof(float)));
     // idk some code to assign heads to y
+    dim3 grid6((N_EMBD + 15) / 16, (num_tokens + 15) / 16);
+    reassemble_heads_cuda<<<grid6, block1>>>(y_heads, y_reassembled, num_tokens, head_dim);
+    CHECK_CUDA_KERNEL("attention reassemble heads");
+
     cudaFree(y_heads);
 
-    mat_mult_cuda<<<grid1, block1>>>(y_reassembled, transformer->c_proj.weight, output, num_tokens, N_EMBD, N_EMBD, MAX_TILE_WIDTH);
+    mat_mult_cuda<<<grid6, block1>>>(y_reassembled, transformer->c_proj.weight, output, num_tokens, N_EMBD, N_EMBD, MAX_TILE_WIDTH);
     CHECK_CUDA_KERNEL("attention mat_mult2");
 
-    mat_add_bias_cuda<<<grid1, block1>>>(output, transformer->c_proj.bias, num_tokens, N_EMBD);
-
+    mat_add_bias_cuda<<<grid6, block1>>>(output, transformer->c_proj.bias, num_tokens, N_EMBD);
     CHECK_CUDA_KERNEL("attention add_bias2");
 
     cudaFree(y_reassembled);
@@ -461,12 +494,13 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
 
     // c_proj: [num_tokens, N_EMBD]
     // now project based on model weights
-    mat_mult_cuda<<<grid, block>>>(h, transformer->c_proj_mlp.weight, output, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
+    dim3 grid2((N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, (num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
+    mat_mult_cuda<<<grid2, block>>>(h, transformer->c_proj_mlp.weight, output, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
 
     CHECK_CUDA_KERNEL("feed forward mat_mult2");
 
     // add bias
-    mat_add_bias_cuda<<<grid, block>>>(output, transformer->c_proj_mlp.bias, num_tokens, N_EMBD);
+    mat_add_bias_cuda<<<grid2, block>>>(output, transformer->c_proj_mlp.bias, num_tokens, N_EMBD);
 
     CHECK_CUDA_KERNEL("feed forward add_bias2");
 
@@ -479,6 +513,7 @@ void top_k(float *logits, int vocab_size, int k, int *top_indices, float *top_sc
     for (int i = 0; i < k; i++)
     {
         top_scores[i] = -1e9f;
+        top_indices[i] = -1;
     }
 
     for (int i = 0; i < vocab_size; i++)
@@ -501,19 +536,22 @@ void top_k(float *logits, int vocab_size, int k, int *top_indices, float *top_sc
     }
 }
 
-void logits(float *x, float *logits, float *wte)
+void logits(float *last_token_emb, float *output_logits, float *wte)
 {
-    compute_logits_cuda<<<(VOCAB_SIZE + THREADS - 1) / THREADS, THREADS>>>(logits, x, wte);
+    compute_logits_cuda<<<(VOCAB_SIZE + THREADS - 1) / THREADS, THREADS>>>(output_logits, last_token_emb, wte);
     CHECK_CUDA_KERNEL("logits");
 }
 
-int inference(GPT2Model *model, int *tokens, int num_tokens)
+int inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_indices, float *top_scores)
 {
     float *h, *attn_out, *mlp_out, *d_logits, *token_embeddings, h_logits[VOCAB_SIZE];
     int *d_tokens;
     TransformerBlock *transformer;
-    int top_indices[5];
-    float top_scores[5];
+    struct timeval timecheck;
+
+    long dev_start, dev_end, dev_elapsed;
+    gettimeofday(&timecheck, NULL);
+    dev_start = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
 
     checkCudaErrors(cudaMalloc(&d_tokens, sizeof(int) * num_tokens));
     checkCudaErrors(cudaMemcpy(d_tokens, tokens, sizeof(int) * num_tokens, cudaMemcpyHostToDevice));
@@ -534,7 +572,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
 
         // Lookup embedding
         input_embedding(d_tokens, token_embeddings, num_tokens, model->wte, model->wpe);
-        printf("Input embedding success!\n\n");
+        // printf("Input embedding success!\n\n");
         // Transformer Layers
         for (int l = 0; l < N_LAYER; l++)
         {
@@ -542,7 +580,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
             // Layer Norm 1
             // returns a numOfTokens x N_EMBD (768) matrix
             layer_norm(token_embeddings, num_tokens, &transformer->ln_1, h);
-            printf("layer=%d: LayerNorm 1 success!\n", l);
+            // printf("layer=%d: LayerNorm 1 success!\n", l);
 
             // Multi-Head Attention
             //    a. QKV Projection
@@ -550,52 +588,52 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
             //    c. Output Projection
 
             attention(h, num_tokens, transformer, attn_out);
-            printf("layer=%d: Attention success!\n", l);
+            // printf("layer=%d: Attention success!\n", l);
 
             // attention_cuda();
 
             // Residual Connection 1
             residual_connection(token_embeddings, attn_out, num_tokens);
-            printf("layer=%d: Residual Connection success!\n", l);
+            // printf("layer=%d: Residual Connection success!\n", l);
 
             // Layer Norm 2
             layer_norm(token_embeddings, num_tokens, &transformer->ln_2, h);
-            printf("layer=%d: LayerNorm 2 success!\n", l);
+            // printf("layer=%d: LayerNorm 2 success!\n", l);
 
             // Feed Forward Network (GELU activation)
             //    a. Linear -> GELU
             //    b. Linear
             feed_forward(h, num_tokens, transformer, mlp_out);
-            printf("layer=%d: Feed Forward success!\n", l);
+            // printf("layer=%d: Feed Forward success!\n", l);
 
             // Residual Connection 2
             residual_connection(token_embeddings, mlp_out, num_tokens);
-            printf("layer=%d: Residual Connection success!\n\n", l);
+            // printf("layer=%d: Residual Connection success!\n\n", l);
         }
 
         // Final Layer Norm
         layer_norm(token_embeddings, num_tokens, &model->ln_f, h);
-        printf("Final Layer norm success!\n");
+        // printf("Final Layer norm success!\n");
 
         // Logits (MatMul with embedding table)
         logits(&h[(num_tokens - 1) * N_EMBD], d_logits, model->wte);
-        printf("Logits success!\n");
+        // printf("Logits success!\n");
 
         checkCudaErrors(cudaMemcpy(h_logits, d_logits, sizeof(float) * VOCAB_SIZE, cudaMemcpyDeviceToHost));
 
         top_k(h_logits, VOCAB_SIZE, 5, top_indices, top_scores);
-        printf("Top K success!\n");
+        // printf("Top K success!\n");
 
         // Synchronize to ensure kernel completion
         cudaDeviceSynchronize();
-        printf("\nTop 5 predictions for the next token in step %d:\n", step);
-        for (int i = 0; i < 5; i++)
-        {
-            printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
-        }
         // Next Token Selection
         // printf("%s", decode_token(current_token));
     }
+    gettimeofday(&timecheck, NULL);
+    dev_end = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
+    dev_elapsed = dev_end - dev_start;
+
+    printf("rank=%d: DEV time: %d procs: %ld msecs\n", 0, 1, dev_elapsed);
 
     cudaFree(h);
     cudaFree(attn_out);
