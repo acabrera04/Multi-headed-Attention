@@ -39,7 +39,18 @@
             exit(EXIT_FAILURE);                                               \
         }                                                                     \
     } while (0)
-__global__ void mat_mult_cuda(float *d_a, float *d_b, float *d_c, int m, int n, int p, int tile_width)
+
+__global__ void mat_add_cuda(float *d_a, float *d_b, int m, int n)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < m && col < n)
+    {
+        d_a[row * n + col] += d_b[row * n + col];
+    }
+}
+
+__global__ void mat_mult_weight_add_bias_cuda(float *a, float *weight, float *out, float *bias, int m, int n, int p, int tile_width)
 {
     __shared__ float a_shared[MAX_TILE_WIDTH][MAX_TILE_WIDTH];
     __shared__ float b_shared[MAX_TILE_WIDTH][MAX_TILE_WIDTH];
@@ -55,12 +66,12 @@ __global__ void mat_mult_cuda(float *d_a, float *d_b, float *d_c, int m, int n, 
         int a_col = ph * tile_width + tx;
         int b_row = ph * tile_width + ty;
         if (row < m && a_col < n)
-            a_shared[ty][tx] = d_a[row * n + a_col];
+            a_shared[ty][tx] = a[row * n + a_col];
         else
             a_shared[ty][tx] = 0;
 
         if (col < p && b_row < n)
-            b_shared[ty][tx] = d_b[b_row * p + col];
+            b_shared[ty][tx] = weight[b_row * p + col];
         else
             b_shared[ty][tx] = 0;
 
@@ -73,27 +84,7 @@ __global__ void mat_mult_cuda(float *d_a, float *d_b, float *d_c, int m, int n, 
         __syncthreads();
     }
     if (row < m && col < p)
-        d_c[row * p + col] = sum;
-}
-
-__global__ void mat_add_cuda(float *d_a, float *d_b, int m, int n)
-{
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < m && col < n)
-    {
-        d_a[row * n + col] += d_b[row * n + col];
-    }
-}
-
-__global__ void mat_add_bias_cuda(float *mat, float *bias, int m, int n)
-{
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row < m && col < n)
-    {
-        mat[row * n + col] += bias[col];
-    }
+        out[row * p + col] = sum + bias[col];
 }
 
 __global__ void softmax_cuda(float *A, int m, int n)
@@ -333,17 +324,6 @@ __global__ void reassemble_heads_cuda(float *y_heads, float *y_reassembled, int 
     }
 }
 
-void checkCuda(const char *func, const char *state)
-{
-    cudaError_t err;
-    err = cudaGetLastError();
-    if (err != cudaSuccess)
-    {
-        printf("%s kernel %s failed: %s\n", func, state, cudaGetErrorString(err));
-    }
-    checkCudaErrors(err);
-}
-
 // Adds token empeddings and position embedding. Creates a num_tokens x N_EMBD matrix
 void input_embedding(int *tokens, float *output, int num_tokens, float *embed_weights, float *pos_weights)
 {
@@ -377,13 +357,8 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
     dim3 block1(BLOCK_DIM, BLOCK_DIM);
     dim3 grid1((3 * N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
 
-    // project qkv
-    mat_mult_cuda<<<grid1, block1>>>(x, transformer->c_attn.weight, qkv, num_tokens, N_EMBD, 3 * N_EMBD, MAX_TILE_WIDTH);
-    CHECK_CUDA_KERNEL("attention mat_mult1");
-
-    // add bias
-    mat_add_bias_cuda<<<grid1, block1>>>(qkv, transformer->c_attn.bias, num_tokens, 3 * N_EMBD);
-    CHECK_CUDA_KERNEL("attention add_bias1");
+    mat_mult_weight_add_bias_cuda<<<grid1, block1>>>(x, transformer->c_attn.weight, qkv, transformer->c_attn.bias, num_tokens, N_EMBD, 3 * N_EMBD, MAX_TILE_WIDTH);
+    CHECK_CUDA_KERNEL("attention mult_weight_add_bias1");
 
     // decompose qkv matrix into Q, K, V
     float *q, *k, *v;
@@ -458,11 +433,8 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
 
     cudaFree(y_heads);
 
-    mat_mult_cuda<<<grid6, block1>>>(y_reassembled, transformer->c_proj.weight, output, num_tokens, N_EMBD, N_EMBD, MAX_TILE_WIDTH);
-    CHECK_CUDA_KERNEL("attention mat_mult2");
-
-    mat_add_bias_cuda<<<grid6, block1>>>(output, transformer->c_proj.bias, num_tokens, N_EMBD);
-    CHECK_CUDA_KERNEL("attention add_bias2");
+    mat_mult_weight_add_bias_cuda<<<grid6, block1>>>(y_reassembled, transformer->c_proj.weight, output, transformer->c_proj.bias, num_tokens, N_EMBD, N_EMBD, MAX_TILE_WIDTH);
+    CHECK_CUDA_KERNEL("attention mult_weight_add_bias2");
 
     cudaFree(y_reassembled);
 }
@@ -478,14 +450,9 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
 
     dim3 block(BLOCK_DIM, BLOCK_DIM);
     dim3 grid((4 * N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
-    mat_mult_cuda<<<grid, block>>>(x, transformer->c_fc.weight, h, num_tokens, N_EMBD, 4 * N_EMBD, MAX_TILE_WIDTH);
 
-    CHECK_CUDA_KERNEL("feed forward mat_mult1");
-
-    // add bias
-    mat_add_bias_cuda<<<grid, block>>>(h, transformer->c_fc.bias, num_tokens, 4 * N_EMBD);
-
-    CHECK_CUDA_KERNEL("feed forward add_bias1");
+    mat_mult_weight_add_bias_cuda<<<grid, block>>>(x, transformer->c_fc.weight, h, transformer->c_fc.bias, num_tokens, N_EMBD, 4 * N_EMBD, MAX_TILE_WIDTH);
+    CHECK_CUDA_KERNEL("feed forward ult_weight_add_bias1");
 
     // gelu
     gelu_cuda<<<grid, block>>>(h, num_tokens, 4 * N_EMBD);
@@ -495,14 +462,9 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
     // c_proj: [num_tokens, N_EMBD]
     // now project based on model weights
     dim3 grid2((N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, (num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
-    mat_mult_cuda<<<grid2, block>>>(h, transformer->c_proj_mlp.weight, output, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
 
-    CHECK_CUDA_KERNEL("feed forward mat_mult2");
-
-    // add bias
-    mat_add_bias_cuda<<<grid2, block>>>(output, transformer->c_proj_mlp.bias, num_tokens, N_EMBD);
-
-    CHECK_CUDA_KERNEL("feed forward add_bias2");
+    mat_mult_weight_add_bias_cuda<<<grid2, block>>>(h, transformer->c_proj_mlp.weight, output, transformer->c_proj_mlp.bias, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
+    CHECK_CUDA_KERNEL("feed forward ult_weight_add_bias2");
 
     cudaFree(h);
 }
