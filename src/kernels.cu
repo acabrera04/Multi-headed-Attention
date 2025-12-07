@@ -20,11 +20,10 @@
 #define NUM_STEPS 100
 #define N_LAYER 12
 
-__global__ void mat_mult_cuda(int *d_a, int *d_b, int *d_c, int m, int n, int p, int tile_width)
+__global__ void mat_mult_cuda(float *d_a, float *d_b, float *d_c, int m, int n, int p, int tile_width)
 {
     __shared__ int a_shared[MAX_TILE_WIDTH][MAX_TILE_WIDTH];
     __shared__ int b_shared[MAX_TILE_WIDTH][MAX_TILE_WIDTH];
-    /* Fill this func */
     int ph, k;
     int tx = threadIdx.x;
     int ty = threadIdx.y;
@@ -32,18 +31,17 @@ __global__ void mat_mult_cuda(int *d_a, int *d_b, int *d_c, int m, int n, int p,
     int col = blockIdx.x * tile_width + tx;
 
     int sum = 0;
-    // TODO Modify for when the dimensions don't matched (n placeholders for everything currently)
     for (ph = 0; ph < ceil(n / (float)tile_width); ph++)
     {
         int a_col = ph * tile_width + tx;
         int b_row = ph * tile_width + ty;
-        if (row < n && a_col < n)
+        if (row < m && a_col < n)
             a_shared[ty][tx] = d_a[row * n + a_col];
         else
             a_shared[ty][tx] = 0;
 
-        if (col < n && b_row < n)
-            b_shared[ty][tx] = d_b[b_row * n + col];
+        if (col < p && b_row < n)
+            b_shared[ty][tx] = d_b[b_row * p + col];
         else
             b_shared[ty][tx] = 0;
 
@@ -55,8 +53,8 @@ __global__ void mat_mult_cuda(int *d_a, int *d_b, int *d_c, int m, int n, int p,
         }
         __syncthreads();
     }
-    if (row < n && col < n)
-        d_c[row * n + col] = sum;
+    if (row < m && col < p)
+        d_c[row * p + col] = sum;
 }
 
 __global__ void mat_scalar_cuda(int *d_a, int m, int n, int scalar)
@@ -149,8 +147,19 @@ __global__ void layer_norm_cuda(float *input, float *output, int num_tokens, flo
         // Normalize
         for (int i = tidx; i < N_EMBD; i += blockDim.x)
         {
-            out[i] = weights[i] * (in[i] - mean) / std_dev + beta[i];
+            out[i] = weights[i] * (in[i] - mean) / std_dev + bias[i];
         }
+    }
+}
+
+__global__ void gelu_cuda(float *x, int m, int n)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row < m && col < n)
+    {
+        float val = x[row * n + col];
+        x[row * n + col] = 0.5f * val * (1.0f + tanh(sqrt(2.0f / M_PI) * (val + 0.044715f * pow(val, 3.0f))));
     }
 }
 
@@ -230,19 +239,44 @@ float *input_embedding(int *tokens, float *output, int num_tokens, float *embed_
 
 void layer_norm(float *x, int num_tokens, LayerNorm *layerNorm, float *output)
 {
-    dim3 block(BLOCK_DIM, BLOCK_DIM);
-    dim3 grid((N_EMBD + 15) / 16, ((num_tokens) + 15) / 16);
-    layer_norm_cuda<<<grid, block>>>(x, output, num_tokens, layerNorm->weight, layerNorm->bias);
+    layer_norm_cuda<<<num_tokens, THREADS>>>(x, output, num_tokens, layerNorm->weight, layerNorm->bias);
 }
 
 void residual_connection(float *x, float *y, int num_tokens)
 {
-    mat_add_cuda<<<(num_tokens * N_EMBD + THREADS - 1) / THREADS, THREADS>>>(x, y, num_tokens, N_EMBD);
+    dim3 block(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid((N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
+    mat_add_cuda<<<grid, block>>>(x, y, num_tokens, N_EMBD);
 }
 
 void attention(float *h, int m, int n, TransformerBlock *transformer, float *output) {}
 
-void feed_forward(float *x, int m, int n, TransformerBlock *transformer, float *output) {}
+void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float *output)
+{
+    // x: [num_tokens, N_EMBD]
+    // c_fc: [N_EMBD, 4*N_EMBD]
+
+    // hidden layer: [num_tokens, 4*N_EMBD]
+    float *h;
+    cudaMalloc(&h, sizeof(float) * num_tokens * 4 * N_EMBD);
+    dim3 block(BLOCK_DIM, BLOCK_DIM);
+    dim3 grid((4 * N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
+    mat_mult_cuda<<<grid, block>>>(x, transformer->c_fc.weight, h, num_tokens, N_EMBD, 4 * N_EMBD, MAX_TILE_WIDTH);
+
+    // add bias
+    mat_add_cuda<<<grid, block>>>(h, transformer->c_fc.bias, num_tokens, 4 * N_EMBD);
+
+    // gelu
+    gelu_cuda<<<grid, block>>>(h, num_tokens, 4 * N_EMBD);
+
+    // c_proj: [4*N_EMBD, N_EMBD]
+    // now project based on model weights
+    mat_mult_cuda<<<grid, block>>>(h, transformer->c_proj_mlp.weight, output, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
+
+    // add bias
+    mat_add_cuda<<<grid, block>>>(output, transformer->c_proj_mlp.bias, num_tokens, N_EMBD);
+    cudaFree(h);
+}
 
 void top_k(float *logits, int vocab_size, int k, int *top_indices, float *top_scores) {}
 
@@ -297,7 +331,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens)
             // Feed Forward Network (GELU activation)
             //    a. Linear -> GELU
             //    b. Linear
-            feed_forward(h, num_tokens, N_EMBD, transformer, mlp_out);
+            feed_forward(h, num_tokens, transformer, mlp_out);
 
             // Residual Connection 2
             residual_connection(token_embeddings, mlp_out, num_tokens);
