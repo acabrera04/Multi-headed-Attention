@@ -530,7 +530,7 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
 
     float *out_local;
     checkCudaErrors(cudaMalloc(&out_local, num_tokens * N_EMBD * sizeof(float)));
-
+    checkCudaErrors(cudaMemset(out_local, 0, num_tokens * N_EMBD * sizeof(float)));
     // and now project back again with provided weights and bias from the model
     // y = y_reassembled dot c_proj_w + c_proj_b
 
@@ -544,6 +544,8 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
     float *h_out = (float *)malloc(sizeof(float) * num_tokens * N_EMBD);
 
     checkCudaErrors(cudaMemcpy(h_out_local, out_local, num_tokens * N_EMBD * sizeof(float), cudaMemcpyDeviceToHost));
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
     MPI_Allreduce(h_out_local, h_out, num_tokens * N_EMBD, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
     free(h_out_local);
     checkCudaErrors(cudaFree(out_local));
@@ -609,6 +611,7 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
     // now project based on model weights
     float *out_local;
     checkCudaErrors(cudaMalloc(&out_local, num_tokens * N_EMBD * sizeof(float)));
+    checkCudaErrors(cudaMemset(out_local, 0, num_tokens * N_EMBD * sizeof(float)));
     dim3 grid2((N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, (num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
     mat_mult_weight_cuda<<<grid2, block>>>(h_local, w_proj_local, out_local, num_tokens, local_hidden, N_EMBD, MAX_TILE_WIDTH);
     CHECK_CUDA_KERNEL("feed forward mat_mult_weight2");
@@ -618,6 +621,8 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
     float *h_out = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
 
     checkCudaErrors(cudaMemcpy(h_out_local, out_local, num_tokens * N_EMBD * sizeof(float), cudaMemcpyDeviceToHost));
+    cudaDeviceSynchronize();
+    MPI_Barrier(MPI_COMM_WORLD);
     MPI_Allreduce(h_out_local, h_out, num_tokens * N_EMBD, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
     free(h_out_local);
     checkCudaErrors(cudaFree(out_local));
