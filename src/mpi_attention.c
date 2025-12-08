@@ -499,7 +499,7 @@ int main(int argc, char **argv)
             printf("Warning: Number of ranks is greater than N_HEAD (12) and some ranks will not be used.\n");
     }
 
-    const char *model_path = "./work/gpt2_124m.bin";
+    const char *model_path = "./gpt2_124m.bin";
     const char *tokens_path = "./work/tokens.bin";
     const char *output_path = "./work/mpi_output.bin";
 

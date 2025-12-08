@@ -378,6 +378,8 @@ CUDA_TARGET = $(WORK_DIR)/cuda_attention
 CUDA_C_OBJS = $(WORK_DIR)/cuda_attention.o $(WORK_DIR)/load_tokens_cuda.o
 CUDA_CU_OBJS = $(WORK_DIR)/kernels.o $(WORK_DIR)/load_model.o
 
+all: serial mpi cuda
+
 cuda: $(CUDA_TARGET)
 
 serial: $(SERIAL_TARGET)
@@ -387,17 +389,14 @@ mpi: $(MPI_TARGET)
 $(WORK_DIR):
 	mkdir -p $(WORK_DIR)
 
-$(MODEL_BIN): | $(WORK_DIR)
-	cd $(SRC_DIR) && python3 serialize_model.py
-
 $(TOKENS_BIN): | $(WORK_DIR)
-	cd $(SRC_DIR) && python3 tokenizer.py "hello world"
+	python3 src/tokenizer.py "hello world"
 
-$(SERIAL_TARGET): $(SERIAL_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
+$(SERIAL_TARGET): $(SERIAL_SRCS) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)
 	$(CC) $(CFLAGS) -x c $(SERIAL_SRCS) -o $(SERIAL_TARGET) $(LIBS)
 
-$(MPI_TARGET): $(MPI_SRCS) $(MODEL_BIN) $(TOKENS_BIN)
+$(MPI_TARGET): $(MPI_SRCS) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)
 	$(MPICXX) -I$(SRC_DIR) $(MPI_CCFLAGS) $(MPI_SRCS) -o $(MPI_TARGET) $(MPI_LDFLAGS) $(LIBS)
 
@@ -425,4 +424,4 @@ $(WORK_DIR)/load_tokens_cuda.o: $(SRC_DIR)/load_tokens.cpp
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 clean:
-	rm -f $(SERIAL_TARGET) $(MODEL_BIN) $(TOKENS_BIN) $(CUDA_TARGET) $(CUDA_CU_OBJS) $(CUDA_C_OBJS)
+	rm -f $(SERIAL_TARGET) $(TOKENS_BIN) $(CUDA_TARGET) $(CUDA_CU_OBJS) $(CUDA_C_OBJS) $(MPI_TARGET)

@@ -372,7 +372,7 @@ void transformerBlockSerial(float *x, TransformerBlock *block, int num_tokens)
 
 int main()
 {
-    const char *model_path = "./work/gpt2_124m.bin";
+    const char *model_path = "./gpt2_124m.bin";
     const char *tokens_path = "./work/tokens.bin";
     const char *output_path = "./work/serial_output.bin";
 
