@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "model.h"
-#include "cuda_utils.h"
 #include "load_tokens.h"
 
 #define NUM_STEPS 100
