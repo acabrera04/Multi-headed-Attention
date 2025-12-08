@@ -6,37 +6,46 @@
 #include <helper_cuda.h>
 #include <unistd.h>
 #include <sys/time.h>
-#include "../include/cuda_utils.h"
+#include "cuda_utils.h"
 #include "model.h"
+#include "mpi.h"
 
-#define MAX_GRID_DIM (1 << 12)
-#define MAX_BLOCK_DIM (1 << 10)
-#define BLOCK_DIM 16
-#define THREADS (1 << 8)
-#define MAX_TILE_WIDTH 16
+__global__ void mat_mult_weight_cuda(float *a, float *weight, float *out, int m, int n, int p, int tile_width)
+{
+    __shared__ float a_shared[MAX_TILE_WIDTH][MAX_TILE_WIDTH];
+    __shared__ float b_shared[MAX_TILE_WIDTH][MAX_TILE_WIDTH];
+    int ph, k;
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * tile_width + ty;
+    int col = blockIdx.x * tile_width + tx;
 
-#define NUM_STEPS 100
-#define N_LAYER 12
+    float sum = 0;
+    for (ph = 0; ph < (n + tile_width - 1) / tile_width; ph++)
+    {
+        int a_col = ph * tile_width + tx;
+        int b_row = ph * tile_width + ty;
+        if (row < m && a_col < n)
+            a_shared[ty][tx] = a[row * n + a_col];
+        else
+            a_shared[ty][tx] = 0;
 
-#define CHECK_CUDA_KERNEL(name)                                               \
-    do                                                                        \
-    {                                                                         \
-        cudaError_t err = cudaGetLastError();                                 \
-        if (err != cudaSuccess)                                               \
-        {                                                                     \
-            fprintf(stderr, "CUDA kernel %s failed at %s:%d: %s\n",           \
-                    name, __FILE__, __LINE__, cudaGetErrorString(err));       \
-            exit(EXIT_FAILURE);                                               \
-        }                                                                     \
-        cudaDeviceSynchronize();                                              \
-        err = cudaGetLastError();                                             \
-        if (err != cudaSuccess)                                               \
-        {                                                                     \
-            fprintf(stderr, "CUDA kernel %s execution failed at %s:%d: %s\n", \
-                    name, __FILE__, __LINE__, cudaGetErrorString(err));       \
-            exit(EXIT_FAILURE);                                               \
-        }                                                                     \
-    } while (0)
+        if (col < p && b_row < n)
+            b_shared[ty][tx] = weight[b_row * p + col];
+        else
+            b_shared[ty][tx] = 0;
+
+        __syncthreads();
+
+        for (k = 0; k < tile_width; k++)
+        {
+            sum += a_shared[ty][k] * b_shared[k][tx];
+        }
+        __syncthreads();
+    }
+    if (row < m && col < p)
+        out[row * p + col] = sum;
+}
 
 __global__ void mat_add_cuda(float *d_a, float *d_b, int m, int n)
 {
@@ -83,6 +92,20 @@ __global__ void mat_mult_weight_add_bias_cuda(float *a, float *weight, float *ou
     }
     if (row < m && col < p)
         out[row * p + col] = sum + bias[col];
+}
+
+__global__ void mat_add_bias_cuda(float *a, float *bias, int m, int n)
+{
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * blockIdx.y + ty;
+    int col = blockIdx.x * blockIdx.x + tx;
+
+    if (row < m && col < n)
+    {
+        float val = a[row * n + col];
+        a[row * n + col] = val + bias[col];
+    }
 }
 
 __global__ void softmax_cuda(float *A, int m, int n)
@@ -244,13 +267,13 @@ __global__ void qkv_decompose_cuda(float *qkv, float *q, float *k, float *v, int
     }
 }
 
-__global__ void scaled_dot_product_cuda(float *q, float *k, float *att, float scale, int num_tokens, int head_dim)
+__global__ void scaled_dot_product_cuda(float *q, float *k, float *att, float scale, int num_tokens, int head_dim, int n_heads)
 {
     int token = blockIdx.x * blockDim.x + threadIdx.x;
     int token2 = blockIdx.y * blockDim.y + threadIdx.y;
     int head = blockIdx.z * blockDim.z + threadIdx.z;
 
-    if (token < num_tokens && token2 < num_tokens && head < N_HEAD)
+    if (token < num_tokens && token2 < num_tokens && head < n_heads)
     {
         float sum = 0.0f;
         for (int i = 0; i < head_dim; i++)
@@ -262,13 +285,13 @@ __global__ void scaled_dot_product_cuda(float *q, float *k, float *att, float sc
     }
 }
 
-__global__ void attention_values_cuda(float *att, float *v, float *y, int num_tokens, int head_dim)
+__global__ void attention_values_cuda(float *att, float *v, float *y, int num_tokens, int head_dim, int n_heads)
 {
     int feat = blockIdx.x * blockDim.x + threadIdx.x;
     int token = blockIdx.y * blockDim.y + threadIdx.y;
     int head = blockIdx.z * blockDim.z + threadIdx.z;
 
-    if (token < num_tokens && feat < head_dim && head < N_HEAD)
+    if (token < num_tokens && feat < head_dim && head < n_heads)
     {
         float sum = 0.0f;
         float *att_base = att + head * num_tokens * num_tokens + token * num_tokens;
@@ -310,15 +333,15 @@ __global__ void compute_logits_cuda(float *logits, float *last_token_emb, float 
     }
 }
 
-__global__ void reassemble_heads_cuda(float *y_heads, float *y_reassembled, int num_tokens, int head_dim)
+__global__ void reassemble_heads_cuda(float *y_heads, float *y_reassembled, int num_tokens, int head_dim, int local_qkv_dim)
 {
     int token = blockDim.y * blockIdx.y + threadIdx.y;
     int feat = blockDim.x * blockIdx.x + threadIdx.x;
-    if (feat < N_EMBD && token < num_tokens)
+    if (feat < local_qkv_dim && token < num_tokens)
     {
         int head = feat / head_dim;
         int d = feat % head_dim;
-        y_reassembled[token * N_EMBD + feat] = y_heads[head * num_tokens * head_dim + token * head_dim + d];
+        y_reassembled[token * local_qkv_dim + feat] = y_heads[head * num_tokens * head_dim + token * head_dim + d];
     }
 }
 
@@ -345,46 +368,114 @@ void residual_connection(float *x, float *y, int num_tokens)
     CHECK_CUDA_KERNEL("residual mat add");
 }
 
-void attention(float *x, int num_tokens, TransformerBlock *transformer, float *output)
+void attention(float *x, int num_tokens, TransformerBlock *transformer, float *output, int rank, int size)
 {
     int head_dim = N_EMBD / N_HEAD;
 
-    float *qkv;
-    checkCudaErrors(cudaMalloc(&qkv, sizeof(float) * num_tokens * 3 * N_EMBD));
+    // Calculate local heads and start offset for this rank
+    int base_heads = N_HEAD / size;
+    int remainder = N_HEAD % size;
+
+    int local_heads = base_heads;
+    if (rank < remainder)
+    {
+        local_heads++;
+    }
+
+    int start_head_idx = 0;
+    if (rank < remainder)
+    {
+        start_head_idx = rank * (base_heads + 1);
+    }
+    else
+    {
+        start_head_idx = remainder * (base_heads + 1) + (rank - remainder) * base_heads;
+    }
+
+    // allocate memory for qkv matrix
+    int local_qkv_dim = local_heads * head_dim;
+
+    // copy weights
+    float *local_w;
+    checkCudaErrors(cudaMalloc(&local_w, N_EMBD * 3 * local_qkv_dim * sizeof(float)));
+
+    for (int i = 0; i < N_EMBD; i++)
+    {
+        for (int h = 0; h < local_heads; h++)
+        {
+            int global_head_idx = start_head_idx + h;
+            // Copy Q portion
+            int src_col_q = global_head_idx * head_dim;
+            int dst_col_q = h * head_dim;
+            checkCudaErrors(cudaMemcpy(&local_w[i * 3 * local_qkv_dim + dst_col_q], &transformer->c_attn.weight[i * 3 * N_EMBD + src_col_q],
+                                       head_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+
+            // Copy K portion
+            int src_col_k = N_EMBD + global_head_idx * head_dim;
+            int dst_col_k = local_qkv_dim + h * head_dim;
+            checkCudaErrors(cudaMemcpy(&local_w[i * 3 * local_qkv_dim + dst_col_k], &transformer->c_attn.weight[i * 3 * N_EMBD + src_col_k],
+                                       head_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+
+            // Copy V portion
+            int src_col_v = 2 * N_EMBD + global_head_idx * head_dim;
+            int dst_col_v = 2 * local_qkv_dim + h * head_dim;
+            checkCudaErrors(cudaMemcpy(&local_w[i * 3 * local_qkv_dim + dst_col_v], &transformer->c_attn.weight[i * 3 * N_EMBD + src_col_v],
+                                       head_dim * sizeof(float), cudaMemcpyDeviceToDevice));
+        }
+    }
+
+    // copy biases
+    float *local_b;
+    checkCudaErrors(cudaMalloc(&local_b, 3 * local_qkv_dim * sizeof(float)));
+
+    for (int h = 0; h < local_heads; h++)
+    {
+        int global_head_idx = start_head_idx + h;
+        checkCudaErrors(cudaMemcpy(&local_b[h * head_dim], &transformer->c_attn.bias[global_head_idx * head_dim],
+                                   head_dim * sizeof(float), cudaMemcpyDeviceToDevice)); // Q
+        checkCudaErrors(cudaMemcpy(&local_b[local_qkv_dim + h * head_dim], &transformer->c_attn.bias[N_EMBD + global_head_idx * head_dim],
+                                   head_dim * sizeof(float), cudaMemcpyDeviceToDevice)); // K
+        checkCudaErrors(cudaMemcpy(&local_b[2 * local_qkv_dim + h * head_dim], &transformer->c_attn.bias[2 * N_EMBD + global_head_idx * head_dim],
+                                   head_dim * sizeof(float), cudaMemcpyDeviceToDevice)); // V
+    }
+
+    float *local_qkv;
+    checkCudaErrors(cudaMalloc(&local_qkv, sizeof(float) * num_tokens * 3 * local_qkv_dim));
 
     dim3 block1(BLOCK_DIM, BLOCK_DIM);
-    dim3 grid1((3 * N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
+    dim3 grid1((3 * local_qkv_dim + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
 
-    mat_mult_weight_add_bias_cuda<<<grid1, block1>>>(x, transformer->c_attn.weight, qkv, transformer->c_attn.bias, num_tokens, N_EMBD, 3 * N_EMBD, MAX_TILE_WIDTH);
+    mat_mult_weight_add_bias_cuda<<<grid1, block1>>>(x, local_w, local_qkv, local_b, num_tokens, N_EMBD, 3 * local_qkv_dim, MAX_TILE_WIDTH);
     CHECK_CUDA_KERNEL("attention mult_weight_add_bias1");
+
+    checkCudaErrors(cudaFree(local_w));
+    checkCudaErrors(cudaFree(local_b));
 
     // decompose qkv matrix into Q, K, V
     float *q, *k, *v;
-    checkCudaErrors(cudaMalloc(&q, sizeof(float) * num_tokens * N_HEAD * head_dim));
-    checkCudaErrors(cudaMalloc(&k, sizeof(float) * num_tokens * N_HEAD * head_dim));
-    checkCudaErrors(cudaMalloc(&v, sizeof(float) * num_tokens * N_HEAD * head_dim));
+    checkCudaErrors(cudaMalloc(&q, sizeof(float) * num_tokens * local_heads * head_dim));
+    checkCudaErrors(cudaMalloc(&k, sizeof(float) * num_tokens * local_heads * head_dim));
+    checkCudaErrors(cudaMalloc(&v, sizeof(float) * num_tokens * local_heads * head_dim));
 
     // hard coded for now since this is a special 3d case
     dim3 block2(8, 8, 4);
-    dim3 grid2((num_tokens + 7) / 8, (head_dim + 7) / 8, (N_HEAD + 3) / 4);
-    qkv_decompose_cuda<<<grid2, block2>>>(qkv, q, k, v, num_tokens, N_HEAD, head_dim);
-
+    dim3 grid2((num_tokens + 7) / 8, (head_dim + 7) / 8, (local_heads + 3) / 4);
+    qkv_decompose_cuda<<<grid2, block2>>>(local_qkv, q, k, v, num_tokens, local_heads, head_dim);
     CHECK_CUDA_KERNEL("attention qkv decompose");
 
-    cudaFree(qkv);
+    cudaFree(local_qkv);
 
     // now computing attention scores = dot product between q and k.T
     // q: [N_HEAD, num_tokens, head_dim]
     // k: [N_HEAD, num_tokens, head_dim]
     // leads to matrix of size: [N_HEAD, num_tokens, num_tokens], the attention matrix
     float *att;
-    checkCudaErrors(cudaMalloc(&att, N_HEAD * num_tokens * num_tokens * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&att, local_heads * num_tokens * num_tokens * sizeof(float)));
 
     float scale = 1.0f / sqrt(head_dim);
-    dim3 grid3((num_tokens + 7) / 8, (num_tokens + 7) / 8, (N_HEAD + 3) / 4);
+    dim3 grid3((num_tokens + 7) / 8, (num_tokens + 7) / 8, (local_heads + 3) / 4);
 
-    scaled_dot_product_cuda<<<grid3, block2>>>(q, k, att, scale, num_tokens, head_dim);
-
+    scaled_dot_product_cuda<<<grid3, block2>>>(q, k, att, scale, num_tokens, head_dim, local_heads);
     CHECK_CUDA_KERNEL("attention scaled dot_product1");
 
     cudaFree(q);
@@ -395,76 +486,148 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
     // basically this means setting upper triangular values to -inf (we use a large negative number)
     // whcih will be zeroed out in softmax
     dim3 grid4((num_tokens + BLOCK_DIM - 1) / BLOCK_DIM, (num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
-    mask_cuda<<<grid4, block1>>>(att, num_tokens, N_HEAD);
+    mask_cuda<<<grid4, block1>>>(att, num_tokens, local_heads);
 
     CHECK_CUDA_KERNEL("attention mask");
 
     // softmax
     // since its a 3D matrix flattened to 1D, we can just treat it as a 2D matrix of size:
-    // [N_HEAD * num_tokens, num_tokens] to apply softmax row-wise
-    softmax_cuda<<<N_HEAD * num_tokens, THREADS>>>(att, N_HEAD * num_tokens, num_tokens);
+    // [local_heads * num_tokens, num_tokens] to apply softmax row-wise
+    softmax_cuda<<<local_heads * num_tokens, THREADS>>>(att, local_heads * num_tokens, num_tokens);
 
     CHECK_CUDA_KERNEL("attention softmax");
 
     // now compute output values for each head with the attention weights and dot product with v
     // reminder: v is from qkv matrix
-    // att: [N_HEAD, num_tokens, num_tokens]
-    // v: [N_HEAD, num_tokens, head_dim]
-    // y: [N_HEAD, num_tokens, head_dim]
+    // att: [local_heads, num_tokens, num_tokens]
+    // v: [local_heads, num_tokens, head_dim]
+    // y: [local_heads, num_tokens, head_dim]
 
     float *y_heads;
-    checkCudaErrors(cudaMalloc(&y_heads, N_HEAD * num_tokens * head_dim * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&y_heads, local_heads * num_tokens * head_dim * sizeof(float)));
 
-    dim3 grid5((head_dim + 7) / 8, (num_tokens + 7) / 8, (N_HEAD + 3) / 4);
-    attention_values_cuda<<<grid5, block2>>>(att, v, y_heads, num_tokens, head_dim);
+    dim3 grid5((head_dim + 7) / 8, (num_tokens + 7) / 8, (local_heads + 3) / 4);
+    attention_values_cuda<<<grid5, block2>>>(att, v, y_heads, num_tokens, head_dim, local_heads);
     CHECK_CUDA_KERNEL("attention output values");
 
     cudaFree(att);
     cudaFree(v);
 
     float *y_reassembled;
-    checkCudaErrors(cudaMalloc(&y_reassembled, num_tokens * N_EMBD * sizeof(float)));
-    // idk some code to assign heads to y
-    dim3 grid6((N_EMBD + 15) / 16, (num_tokens + 15) / 16);
-    reassemble_heads_cuda<<<grid6, block1>>>(y_heads, y_reassembled, num_tokens, head_dim);
+    checkCudaErrors(cudaMalloc(&y_reassembled, num_tokens * local_qkv_dim * sizeof(float)));
+
+    dim3 grid6((local_qkv_dim + 15) / 16, (num_tokens + 15) / 16);
+    reassemble_heads_cuda<<<grid6, block1>>>(y_heads, y_reassembled, num_tokens, head_dim, local_qkv_dim);
     CHECK_CUDA_KERNEL("attention reassemble heads");
 
     cudaFree(y_heads);
 
-    mat_mult_weight_add_bias_cuda<<<grid6, block1>>>(y_reassembled, transformer->c_proj.weight, output, transformer->c_proj.bias, num_tokens, N_EMBD, N_EMBD, MAX_TILE_WIDTH);
-    CHECK_CUDA_KERNEL("attention mult_weight_add_bias2");
+    // partial projection to output
+    float *proj_w_local = (float *)malloc(local_qkv_dim * N_EMBD * sizeof(float));
+    checkCudaErrors(cudaMalloc(&proj_w_local, local_qkv_dim * N_EMBD * sizeof(float)));
+    int row_offset = start_head_idx * head_dim;
+    checkCudaErrors(cudaMemcpy(proj_w_local, &transformer->c_proj.weight[row_offset * N_EMBD], local_qkv_dim * N_EMBD * sizeof(float), cudaMemcpyDeviceToDevice));
+
+    float *out_local = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
+    checkCudaErrors(cudaMalloc(&out_local, num_tokens * N_EMBD * sizeof(float)));
+
+    // and now project back again with provided weights and bias from the model
+    // y = y_reassembled dot c_proj_w + c_proj_b
+
+    mat_mult_weight_cuda<<<grid6, block1>>>(y_reassembled, proj_w_local, out_local, num_tokens, local_qkv_dim, N_EMBD, MAX_TILE_WIDTH);
+    CHECK_CUDA_KERNEL("attention mult_weight2");
 
     cudaFree(y_reassembled);
+    cudaFree(proj_w_local);
+
+    float *h_out_local = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
+    float *h_out = (float *)malloc(sizeof(float) * num_tokens * N_EMBD);
+
+    checkCudaErrors(cudaMemcpy(h_out_local, out_local, num_tokens * N_EMBD * sizeof(float), cudaMemcpyDeviceToHost));
+    MPI_Allreduce(h_out_local, h_out, num_tokens * N_EMBD, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    free(h_out_local);
+    checkCudaErrors(cudaFree(out_local));
+    checkCudaErrors(cudaMemcpy(output, h_out, sizeof(float) * num_tokens * N_EMBD, cudaMemcpyHostToDevice));
+    free(h_out);
+
+    dim3 grid7((N_EMBD + 15) / 16, (num_tokens + 15) / 16);
+    mat_add_bias_cuda<<<grid7, block1>>>(output, transformer->c_proj.bias, num_tokens, N_EMBD);
+    CHECK_CUDA_KERNEL("attention mult_add_bias2");
 }
 
-void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float *output)
+void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float *output, int rank, int size)
 {
     // x: [num_tokens, N_EMBD]
     // c_fc: [N_EMBD, 4*N_EMBD]
 
     // hidden layer: [num_tokens, 4*N_EMBD]
-    float *h;
-    checkCudaErrors(cudaMalloc(&h, sizeof(float) * num_tokens * 4 * N_EMBD));
+    // split this across ranks
+    int hidden_dim = 4 * N_EMBD;
+    int local_hidden = hidden_dim / size;
+
+    // copy weights
+    float *w_fc_local;
+    checkCudaErrors(cudaMalloc(&w_fc_local, N_EMBD * local_hidden * sizeof(float)));
+
+    for (int i = 0; i < N_EMBD; i++)
+    {
+        checkCudaErrors(cudaMemcpy(&w_fc_local[i * local_hidden],
+                                   &transformer->c_fc.weight[i * hidden_dim + rank * local_hidden],
+                                   local_hidden * sizeof(float), cudaMemcpyDeviceToDevice));
+    }
+
+    // copy bias
+    float *b_fc_local;
+    checkCudaErrors(cudaMalloc(&b_fc_local, local_hidden * sizeof(float)));
+    checkCudaErrors(cudaMemcpy(b_fc_local, &transformer->c_fc.bias[rank * local_hidden], local_hidden * sizeof(float), cudaMemcpyDeviceToDevice));
+
+    float *h_local;
+    checkCudaErrors(cudaMalloc(&h_local, sizeof(float) * num_tokens * local_hidden));
 
     dim3 block(BLOCK_DIM, BLOCK_DIM);
-    dim3 grid((4 * N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
+    dim3 grid((local_hidden + BLOCK_DIM - 1) / BLOCK_DIM, ((num_tokens) + BLOCK_DIM - 1) / BLOCK_DIM);
 
-    mat_mult_weight_add_bias_cuda<<<grid, block>>>(x, transformer->c_fc.weight, h, transformer->c_fc.bias, num_tokens, N_EMBD, 4 * N_EMBD, MAX_TILE_WIDTH);
+    mat_mult_weight_add_bias_cuda<<<grid, block>>>(x, w_fc_local, h_local, b_fc_local, num_tokens, N_EMBD, local_hidden, MAX_TILE_WIDTH);
     CHECK_CUDA_KERNEL("feed forward ult_weight_add_bias1");
 
-    // gelu
-    gelu_cuda<<<grid, block>>>(h, num_tokens, 4 * N_EMBD);
+    checkCudaErrors(cudaFree(w_fc_local));
+    checkCudaErrors(cudaFree(b_fc_local));
 
+    // gelu
+    gelu_cuda<<<grid, block>>>(h_local, num_tokens, local_hidden);
     CHECK_CUDA_KERNEL("feed forward gelu");
 
-    // c_proj: [num_tokens, N_EMBD]
+    // copy weights
+    float *w_proj_local;
+    checkCudaErrors(cudaMalloc(&w_proj_local, N_EMBD * local_hidden * sizeof(float)));
+
+    checkCudaErrors(cudaMemcpy(w_proj_local,
+                               &transformer->c_proj_mlp.weight[rank * local_hidden * N_EMBD],
+                               local_hidden * N_EMBD * sizeof(float), cudaMemcpyDeviceToDevice));
+
+    // c_proj: [local_hidden, N_EMBD]
     // now project based on model weights
+    float *out_local;
+    checkCudaErrors(cudaMalloc(&out_local, num_tokens * N_EMBD * sizeof(float)));
     dim3 grid2((N_EMBD + BLOCK_DIM - 1) / BLOCK_DIM, (num_tokens + BLOCK_DIM - 1) / BLOCK_DIM);
+    mat_mult_weight_cuda<<<grid2, block>>>(h_local, w_proj_local, out_local, num_tokens, local_hidden, N_EMBD, MAX_TILE_WIDTH);
+    CHECK_CUDA_KERNEL("feed forward mat_mult_weight2");
+    checkCudaErrors(cudaFree(w_proj_local));
 
-    mat_mult_weight_add_bias_cuda<<<grid2, block>>>(h, transformer->c_proj_mlp.weight, output, transformer->c_proj_mlp.bias, num_tokens, 4 * N_EMBD, N_EMBD, MAX_TILE_WIDTH);
-    CHECK_CUDA_KERNEL("feed forward ult_weight_add_bias2");
+    float *h_out_local = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
+    float *h_out = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
 
-    cudaFree(h);
+    checkCudaErrors(cudaMemcpy(h_out_local, out_local, num_tokens * N_EMBD * sizeof(float), cudaMemcpyDeviceToHost));
+    MPI_Allreduce(h_out_local, h_out, num_tokens * N_EMBD, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    free(h_out_local);
+    checkCudaErrors(cudaFree(out_local));
+    checkCudaErrors(cudaMemcpy(output, h_out, num_tokens * N_EMBD * sizeof(float), cudaMemcpyHostToDevice));
+    free(h_out);
+
+    mat_add_bias_cuda<<<grid2, block>>>(output, transformer->c_proj_mlp.bias, num_tokens, N_EMBD);
+    CHECK_CUDA_KERNEL("feed forward mat_add_bias2");
+
+    cudaFree(h_local);
 }
 
 // not sure if worth it to parrallize
@@ -502,7 +665,7 @@ void logits(float *last_token_emb, float *output_logits, float *wte)
     CHECK_CUDA_KERNEL("logits");
 }
 
-int inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_indices, float *top_scores)
+int mpi_cuda_inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_indices, float *top_scores, int rank, int size)
 {
     float *h, *attn_out, *mlp_out, *d_logits, *token_embeddings, h_logits[VOCAB_SIZE];
     int *d_tokens;
@@ -547,7 +710,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_ind
             //    b. Attention Mechanism (Softmax(Q*K^T / sqrt(d_k)) * V)
             //    c. Output Projection
 
-            attention(h, num_tokens, transformer, attn_out);
+            attention(h, num_tokens, transformer, attn_out, rank, size);
             // printf("layer=%d: Attention success!\n", l);
 
             // attention_cuda();
@@ -563,7 +726,7 @@ int inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_ind
             // Feed Forward Network (GELU activation)
             //    a. Linear -> GELU
             //    b. Linear
-            feed_forward(h, num_tokens, transformer, mlp_out);
+            feed_forward(h, num_tokens, transformer, mlp_out, rank, size);
             // printf("layer=%d: Feed Forward success!\n", l);
 
             // Residual Connection 2

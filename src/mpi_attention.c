@@ -249,6 +249,7 @@ void attentionMPI(float *x, TransformerBlock *block, int num_tokens, float *out,
             }
         }
     }
+    free(local_qkv);
 
     // now computing attention scores = dot product between q and k.T
     // q: [N_HEAD, num_tokens, head_dim]

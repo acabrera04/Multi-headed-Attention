@@ -284,6 +284,10 @@ LIBRARIES :=
 
 # MPI check and binaries
 MPICXX ?= $(shell which mpicxx 2>/dev/null)
+MPI_INCLUDES ?= $(shell $(MPICXX) --showme:incdirs 2>/dev/null)
+ifneq ($(MPI_INCLUDES),)
+    MPI_INCLUDES := $(addprefix -I,$(MPI_INCLUDES))
+endif
 
 ifneq ($(TARGET_ARCH),$(HOST_ARCH))
       $(info -----------------------------------------------------------------------------------------------)
@@ -371,20 +375,31 @@ MPI_TARGET = $(WORK_DIR)/mpi_attention
 
 # CUDA source files
 CUDA_C_SRCS = $(SRC_DIR)/cuda_attention.cpp $(SRC_DIR)/load_tokens.cpp
-CUDA_CU_SRCS = $(SRC_DIR)/kernels.cu $(SRC_DIR)/load_model.cu
+CUDA_CU_SRCS = $(SRC_DIR)/cuda_ver.cu $(SRC_DIR)/load_model.cu
 CUDA_TARGET = $(WORK_DIR)/cuda_attention
 
 # Object files
 CUDA_C_OBJS = $(WORK_DIR)/cuda_attention.o $(WORK_DIR)/load_tokens_cuda.o
-CUDA_CU_OBJS = $(WORK_DIR)/kernels.o $(WORK_DIR)/load_model.o
+CUDA_CU_OBJS = $(WORK_DIR)/cuda_ver.o $(WORK_DIR)/load_model.o
 
-all: serial mpi cuda
+# MPI + CUDA source files
+MPI_CUDA_C_SRCS = $(SRC_DIR)/mpi_cuda_attention.cpp $(SRC_DIR)/load_tokens.cpp
+MPI_CUDA_CU_SRCS = $(SRC_DIR)/mpi_cuda_ver.cu $(SRC_DIR)/load_model.cu
+MPI_CUDA_TARGET = $(WORK_DIR)/mpi_cuda_attention
+
+# Object files
+MPI_CUDA_C_OBJS = $(WORK_DIR)/mpi_cuda_attention.o $(WORK_DIR)/load_tokens_cuda.o
+MPI_CUDA_CU_OBJS = $(WORK_DIR)/mpi_cuda_ver.o $(WORK_DIR)/load_model.o
+
+all: serial mpi cuda mpi_cuda
 
 cuda: $(CUDA_TARGET)
 
 serial: $(SERIAL_TARGET)
 
 mpi: $(MPI_TARGET)
+
+mpi_cuda: $(MPI_CUDA_TARGET)
 
 $(WORK_DIR):
 	mkdir -p $(WORK_DIR)
@@ -400,13 +415,31 @@ $(MPI_TARGET): $(MPI_SRCS) $(TOKENS_BIN)
 	@mkdir -p $(WORK_DIR)
 	$(MPICXX) -I$(SRC_DIR) $(MPI_CCFLAGS) $(MPI_SRCS) -o $(MPI_TARGET) $(MPI_LDFLAGS) $(LIBS)
 
+$(MPI_CUDA_TARGET): $(MPI_CUDA_C_OBJS) $(MPI_CUDA_CU_OBJS)
+	@mkdir -p $(WORK_DIR)
+	$(MPICXX) $(MPI_LDFLAGS) -o $@ $+ $(LIBRARIES) -lm -L$(CUDA_PATH)/lib$(LIBSIZE) -lcudart
+
+# Compile MPI+CUDA .cpp files
+$(WORK_DIR)/mpi_cuda_attention.o: $(SRC_DIR)/mpi_cuda_attention.cpp
+	@mkdir -p $(WORK_DIR)
+	$(MPICXX) -I$(SRC_DIR) $(MPI_CCFLAGS) -c $< -o $@
+
+$(WORK_DIR)/load_tokens_mpi_cuda.o: $(SRC_DIR)/load_tokens.cpp
+	@mkdir -p $(WORK_DIR)
+	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
+
+# Compile MPI+CUDA .cu files
+$(WORK_DIR)/mpi_cuda_ver.o: $(SRC_DIR)/mpi_cuda_ver.cu
+	@mkdir -p $(WORK_DIR)
+	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(MPI_INCLUDES) $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
+
 # CUDA compilation - link all objects together
 $(CUDA_TARGET): $(CUDA_C_OBJS) $(CUDA_CU_OBJS)
 	@mkdir -p $(WORK_DIR)
 	$(NVCC) $(ALL_LDFLAGS) $(GENCODE_FLAGS) -lineinfo -o $@ $+ $(LIBRARIES) -lm
 
 # Compile .cu files
-$(WORK_DIR)/kernels.o: $(SRC_DIR)/kernels.cu
+$(WORK_DIR)/cuda_ver.o: $(SRC_DIR)/cuda_ver.cu
 	@mkdir -p $(WORK_DIR)
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
@@ -424,4 +457,4 @@ $(WORK_DIR)/load_tokens_cuda.o: $(SRC_DIR)/load_tokens.cpp
 	$(NVCC) $(INCLUDES) -Iinclude -Isrc $(ALL_CCFLAGS) $(GENCODE_FLAGS) -o $@ -c $<
 
 clean:
-	rm -f $(SERIAL_TARGET) $(TOKENS_BIN) $(CUDA_TARGET) $(CUDA_CU_OBJS) $(CUDA_C_OBJS) $(MPI_TARGET)
+	rm -f $(SERIAL_TARGET) $(TOKENS_BIN) $(CUDA_TARGET) $(CUDA_CU_OBJS) $(CUDA_C_OBJS) $(MPI_TARGET) $(MPI_CUDA_TARGET)

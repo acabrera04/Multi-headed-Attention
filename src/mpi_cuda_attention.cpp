@@ -10,13 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
-#include <cuda_runtime.h>
-#include "../include/cuda_utils.h"
+#include "cuda_utils.h"
 
 int *load_tokens(const char *filename, int *num_tokens);
 GPT2Model *load_model(const char *filename);
 void free_model(GPT2Model *model);
-int inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_indices, float *top_scores);
+int mpi_cuda_inference(GPT2Model *model, int *tokens, int num_tokens, int k, int *top_indices, float *top_scores, int rank, int size);
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
@@ -47,10 +46,12 @@ int main(int argc, char **argv)
     }
 
     // Input Processing - encode/tokenize input text, get tokens
-    if (rank == 0) {
+    if (rank == 0)
+    {
         tokens = load_tokens(tokens_path, &num_tokens);
         printf("rank 0 has loaded %d tokens\n", num_tokens);
-        if (!tokens) {
+        if (!tokens)
+        {
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
@@ -59,26 +60,32 @@ int main(int argc, char **argv)
 
     printf("Rank %d: numtokens: %d\n", rank, num_tokens);
 
-    if (rank != 0) {
+    if (rank != 0)
+    {
         tokens = (int *)malloc(num_tokens * sizeof(int));
     }
 
     MPI_Bcast(tokens, num_tokens, MPI_INT, 0, MPI_COMM_WORLD);
-    
+
     // call inference in cuda
-    inference(model, tokens, num_tokens, k, top_indices, top_scores);
+    mpi_cuda_inference(model, tokens, num_tokens, k, top_indices, top_scores, rank, size);
 
-    printf("\nTop 5 predictions for the next token:\n");
-    for (int i = 0; i < 5; i++)
+    if (rank == 0)
     {
-        printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
-    }
+        printf("\nTop 5 predictions for the next token:\n");
+        for (int i = 0; i < 5; i++)
+        {
+            printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
+        }
 
-    FILE *f = fopen(output_path, "wb");
+            FILE *f = fopen(output_path, "wb");
     fwrite(top_indices, sizeof(int), k, f);
     fclose(f);
 
     printf("\nTop 5 token IDs saved to %s\n", output_path);
+    }
+
+
 
     // Free memory
     free(tokens);
