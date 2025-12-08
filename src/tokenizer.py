@@ -7,7 +7,7 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 text = sys.argv[1]
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer = GPT2Tokenizer.from_pretrained("./tokenizer/")
 tokens = tokenizer.encode(text, add_special_tokens=False)
 
 output_file = "./work/tokens.bin"
