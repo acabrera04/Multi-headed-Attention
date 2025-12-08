@@ -9,7 +9,7 @@ def write_tensor(f, tensor):
   arr = tensor.detach().cpu().numpy().astype(np.float32)
   f.write(arr.tobytes())
 
-with open("./work/gpt2_124m.bin", "wb") as f:
+with open("./gpt2_124m.bin", "wb") as f:
   # embeddings
   write_tensor(f, model.wte.weight)  # token embeddings
   write_tensor(f, model.wpe.weight)  # positional embeddings

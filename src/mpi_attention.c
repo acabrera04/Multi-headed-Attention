@@ -509,9 +509,25 @@ int main(int argc, char **argv)
         return 1;
 
     int num_tokens;
-    int *tokens = load_tokens(tokens_path, &num_tokens);
-    if (!tokens)
-        return 1;
+    int *tokens;
+    
+    if (rank == 0) {
+        tokens = load_tokens(tokens_path, &num_tokens);
+        printf("rank 0 has loaded %d tokens\n", num_tokens);
+        if (!tokens) {
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+
+    MPI_Bcast(&num_tokens, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+    printf("Rank %d: numtokens: %d\n", rank, num_tokens);
+
+    if (rank != 0) {
+        tokens = (int *)malloc(num_tokens * sizeof(int));
+    }
+
+    MPI_Bcast(tokens, num_tokens, MPI_INT, 0, MPI_COMM_WORLD);
 
     struct timeval timecheck;
 
