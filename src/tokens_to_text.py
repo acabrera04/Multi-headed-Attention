@@ -19,7 +19,7 @@ def main():
     else:
         input_file = sys.argv[1]
     
-    tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+    tokenizer = GPT2Tokenizer.from_pretrained("./tokenizer/")
     tokens = list(load_tokens(input_file))
     print(f"Decoded {len(tokens)} tokens from '{input_file}' to text:")
 
