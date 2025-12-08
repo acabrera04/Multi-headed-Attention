@@ -98,8 +98,8 @@ __global__ void mat_add_bias_cuda(float *a, float *bias, int m, int n)
 {
     int tx = threadIdx.x;
     int ty = threadIdx.y;
-    int row = blockIdx.y * blockIdx.y + ty;
-    int col = blockIdx.x * blockIdx.x + tx;
+    int row = blockIdx.y * blockDim.y + ty;
+    int col = blockIdx.x * blockDim.x + tx;
 
     if (row < m && col < n)
     {
@@ -248,7 +248,7 @@ __global__ void gelu_cuda(float *x, int m, int n)
     }
 }
 
-__global__ void qkv_decompose_cuda(float *qkv, float *q, float *k, float *v, int num_tokens, int n_head, int head_dim)
+__global__ void qkv_decompose_cuda(float *qkv, float *q, float *k, float *v, int num_tokens, int n_head, int head_dim, int local_qkv_dim)
 {
     int token = blockIdx.x * blockDim.x + threadIdx.x;
     int feat = blockIdx.y * blockDim.y + threadIdx.y;
@@ -258,12 +258,12 @@ __global__ void qkv_decompose_cuda(float *qkv, float *q, float *k, float *v, int
     {
         int idx = num_tokens * head_dim * head + head_dim * token + feat;
 
-        int qkv_offset = token * 3 * N_EMBD;
+        int qkv_offset = token * 3 * local_qkv_dim;
 
         // Q is first N_EMBD, K is second N_EMBD, V is third N_EMBD (so offset by N_EMBD and 2*N_EMBD)
         q[idx] = qkv[qkv_offset + head * head_dim + feat];
-        k[idx] = qkv[qkv_offset + N_EMBD + head * head_dim + feat];
-        v[idx] = qkv[qkv_offset + 2 * N_EMBD + head * head_dim + feat];
+        k[idx] = qkv[qkv_offset + local_qkv_dim + head * head_dim + feat];
+        v[idx] = qkv[qkv_offset + 2 * local_qkv_dim + head * head_dim + feat];
     }
 }
 
@@ -460,7 +460,7 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
     // hard coded for now since this is a special 3d case
     dim3 block2(8, 8, 4);
     dim3 grid2((num_tokens + 7) / 8, (head_dim + 7) / 8, (local_heads + 3) / 4);
-    qkv_decompose_cuda<<<grid2, block2>>>(local_qkv, q, k, v, num_tokens, local_heads, head_dim);
+    qkv_decompose_cuda<<<grid2, block2>>>(local_qkv, q, k, v, num_tokens, local_heads, head_dim, local_qkv_dim);
     CHECK_CUDA_KERNEL("attention qkv decompose");
 
     cudaFree(local_qkv);
@@ -523,12 +523,12 @@ void attention(float *x, int num_tokens, TransformerBlock *transformer, float *o
     cudaFree(y_heads);
 
     // partial projection to output
-    float *proj_w_local = (float *)malloc(local_qkv_dim * N_EMBD * sizeof(float));
+    float *proj_w_local;
     checkCudaErrors(cudaMalloc(&proj_w_local, local_qkv_dim * N_EMBD * sizeof(float)));
     int row_offset = start_head_idx * head_dim;
     checkCudaErrors(cudaMemcpy(proj_w_local, &transformer->c_proj.weight[row_offset * N_EMBD], local_qkv_dim * N_EMBD * sizeof(float), cudaMemcpyDeviceToDevice));
 
-    float *out_local = (float *)malloc(num_tokens * N_EMBD * sizeof(float));
+    float *out_local;
     checkCudaErrors(cudaMalloc(&out_local, num_tokens * N_EMBD * sizeof(float)));
 
     // and now project back again with provided weights and bias from the model
@@ -756,7 +756,7 @@ int mpi_cuda_inference(GPT2Model *model, int *tokens, int num_tokens, int k, int
     dev_end = (long)timecheck.tv_sec * 1000 + (long)timecheck.tv_usec / 1000;
     dev_elapsed = dev_end - dev_start;
 
-    printf("rank=%d: DEV time: %d procs: %ld msecs\n", 0, 1, dev_elapsed);
+    printf("rank=%d: DEV time: %d procs: %ld msecs\n", rank, size, dev_elapsed);
 
     cudaFree(h);
     cudaFree(attn_out);

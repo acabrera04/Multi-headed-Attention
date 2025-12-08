@@ -78,14 +78,12 @@ int main(int argc, char **argv)
             printf("%d. Token ID: %d, Score: %.4f\n", i + 1, top_indices[i], top_scores[i]);
         }
 
-            FILE *f = fopen(output_path, "wb");
-    fwrite(top_indices, sizeof(int), k, f);
-    fclose(f);
+        FILE *f = fopen(output_path, "wb");
+        fwrite(top_indices, sizeof(int), k, f);
+        fclose(f);
 
-    printf("\nTop 5 token IDs saved to %s\n", output_path);
+        printf("\nTop 5 token IDs saved to %s\n", output_path);
     }
-
-
 
     // Free memory
     free(tokens);
