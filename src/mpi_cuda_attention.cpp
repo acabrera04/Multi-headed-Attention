@@ -10,7 +10,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
-#include "cuda_utils.h"
 
 int *load_tokens(const char *filename, int *num_tokens);
 GPT2Model *load_model(const char *filename);
