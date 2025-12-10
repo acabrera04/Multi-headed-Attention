@@ -27,6 +27,10 @@ This should already be included, but in the case it is not provided download it 
 2. python3 src/tokenizer.py "$(cat 2.txt)"
 3. python3 src/tokenizer.py "$(cat 3.txt)"
 This loads ./work/tokens.bin which all inference code uses
+Or you can specify an alternate output file as a second argument:
+python3 src/tokenizer.py "Your text here" ./work/your_tokens.bin
+If you do this, be sure then then you can pass this file to the inference programs as a second argument. Else it will default to ./work/tokens.bin
+Example: ./work/serial_attention ./work/your_tokens.bin
 
 # Running Inference - Serial
 1. ./work/serial_attention
