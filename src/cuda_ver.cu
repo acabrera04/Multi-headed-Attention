@@ -466,7 +466,7 @@ void feed_forward(float *x, int num_tokens, TransformerBlock *transformer, float
     cudaFree(h);
 }
 
-// not sure if worth it to parrallize
+// not sure if worth it to parallelize
 void top_k(float *logits, int vocab_size, int k, int *top_indices, float *top_scores)
 {
     for (int i = 0; i < k; i++)
