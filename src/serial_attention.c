@@ -370,10 +370,15 @@ void transformerBlockSerial(float *x, TransformerBlock *block, int num_tokens)
     free(mlp_out);
 }
 
-int main()
+int main(int argc, char **argv)
 {
     const char *model_path = "./gpt2_124m.bin";
-    const char *tokens_path = "./work/tokens.bin";
+    char *tokens_path = "./work/tokens.bin";
+
+    if (argc == 2) {
+        tokens_path = argv[1];
+    }
+
     const char *output_path = "./work/serial_output.bin";
 
     GPT2Model *model = load_model_serial(model_path);

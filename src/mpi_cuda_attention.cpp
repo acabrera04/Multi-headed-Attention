@@ -31,7 +31,11 @@ int main(int argc, char **argv)
     // Initialize - start CUDA device, load model, allocate memory, create current state
     // Read arg1 for input
     const char *model_path = "./gpt2_124m.bin";
-    const char *tokens_path = "./work/tokens.bin";
+    char *tokens_path = "./work/tokens.bin";
+
+    if (argc == 2) {
+        tokens_path = argv[1];
+    }
     const char *output_path = "./work/cuda_output.bin";
     int *tokens, num_tokens;
     GPT2Model *model = load_model(model_path);
