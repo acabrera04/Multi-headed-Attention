@@ -1,0 +1,62 @@
+###################################################################
+
+YOU MUST TOKENIZE INPUTS BEFORE RUNNING INFERENCE
+YOU MUST HAVE GPT2-124M DOWNLOADED
+
+###################################################################
+
+# Downloading GPT2-124M
+
+This should already be included, but in the case it is not provided download it again using
+
+1. `python3 -m venv venv`
+2. `source ./venv/bin/activate`
+3. `pip install -r requirements.txt`
+4. `python3 src/serialize_model.py`
+
+# Make Commands
+
+- `make` - make everything
+- `make serial` - serial only
+- `make mpi` - serial + mpi
+- `make cuda` - cuda only
+- `make mpi_cuda` - cuda + mpi
+- `make clean` - clear directory
+
+# Running inference is a 2 part process
+
+1. Generate input from text file using python tokenizer.
+2. Run inference program.
+
+# Input Generation (sample prompts 1 through 3)
+
+1. `python3 src/tokenizer.py "$(cat 1.txt)"`
+2. `python3 src/tokenizer.py "$(cat 2.txt)"`
+3. `python3 src/tokenizer.py "$(cat 3.txt)"`
+
+This loads `./work/tokens.bin` which all inference code uses
+
+Or you can specify an alternate output file as a second argument:
+`python3 src/tokenizer.py "Your text here" ./work/your_tokens.bin`
+If you do this, be sure then then you can pass this file to the inference programs as a second argument. Else it will default to `./work/tokens.bin`
+Example: `./work/serial_attention ./work/your_tokens.bin`
+
+# Running Inference - Serial
+
+1. `./work/serial_attention`
+
+# Running Inference - MPI
+
+1. `mpirun --hostfile hostfile.2 -n 2 ./work/mpi_attention`
+2. `mpirun --hostfile hostfile.4 -n 4 ./work/mpi_attention`
+3. `mpirun --hostfile hostfile.8 -n 8 ./work/mpi_attention`
+
+# Running Inference - CUDA
+
+1. `./work/cuda_attention`
+
+# Running Inference - MPI + CUDA
+
+1. `mpirun --hostfile hostfile.2 -n 2 ./work/mpi_cuda_attention`
+2. `mpirun --hostfile hostfile.4 -n 4 ./work/mpi_cuda_attention`
+3. `mpirun --hostfile hostfile.8 -n 8 ./work/mpi_cuda_attention`
